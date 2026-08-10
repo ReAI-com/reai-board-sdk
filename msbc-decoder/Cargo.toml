@@ -1,0 +1,18 @@
+[package]
+name = "msbc-decoder"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.87"
+authors = ["ReAI Team"]
+# This crate is a bit-exact Rust translation of FFmpeg's libavcodec/sbcdec.c,
+# which is licensed under LGPL-2.1-or-later. A translation is a derivative
+# work, so this crate inherits that license. See LICENSE and the copyright
+# header in src/lib.rs.
+license = "LGPL-2.1-or-later"
+description = "mSBC (16 kHz wideband SBC) decoder in pure Rust — a bit-exact translation of FFmpeg's sbcdec"
+repository = "https://github.com/ReAI-com/reai-board-sdk"
+readme = "README.md"
+keywords = ["msbc", "sbc", "bluetooth", "audio", "codec"]
+categories = ["multimedia::audio", "no-std"]
+
+[dependencies]

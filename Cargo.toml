@@ -1,0 +1,66 @@
+[workspace]
+members = ["msbc-decoder"]
+
+[package]
+name = "reai-board-sdk"
+version = "0.2.2"
+edition = "2021"
+rust-version = "1.87"
+authors = ["ReAI Team"]
+license = "MIT"
+description = "ReAI Vibe Board keyboard SDK — USB/BLE connectivity, auto-reconnect, HID protocol, mSBC decoding, USB Audio capture"
+repository = "https://github.com/ReAI-com/reai-board-sdk"
+homepage = "https://b.reai.com"
+documentation = "https://docs.rs/reai-board-sdk"
+readme = "README.md"
+# crates.io 上限 5 个 keywords
+keywords = ["keyboard", "hid", "ble", "usb", "hardware"]
+categories = ["api-bindings", "hardware-support"]
+# 产品配图仅用于 GitHub / crates.io 页面展示，不进 crate 包
+exclude = ["assets/*"]
+
+[features]
+# Default: full feature set (USB + BLE + test-mode)
+default = ["usb", "ble", "test-mode"]
+# USB HID + cpal USB Audio capture
+usb = ["dep:hidapi", "dep:cpal"]
+# BLE Vendor GATT (btleplug native async) + mSBC decoding.
+#
+# NOTE ON LICENSING: this feature pulls in `msbc-decoder`, which is
+# LGPL-2.1-or-later (it is a bit-exact translation of FFmpeg's SBC decoder).
+# The rest of this crate is MIT. Build without `ble` and no LGPL code is
+# compiled into your binary.
+ble = ["dep:btleplug", "dep:futures-util", "dep:msbc-decoder"]
+# Factory test commands (e.g. shutdown 0x5E)
+test-mode = []
+
+[dependencies]
+uuid = { version = "1", features = ["v4"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+anyhow = "1"
+thiserror = "1"
+log = "0.4"
+# Internal SmallVec in key_aggregator to inline up to 12 key indices on the hot path.
+smallvec = "1"
+# The runtime layer is fully tokio-based: rt + time + macros + sync + rt-multi-thread
+# are mandatory (hotplug/device uses tokio::spawn / tokio::time::sleep / spawn_blocking
+# under any feature combination). Calling applications are expected to use a
+# multi-thread runtime; btleplug also requires it.
+tokio = { version = "1", default-features = false, features = ["sync", "rt", "rt-multi-thread", "time", "macros"] }
+# USB HID (usb feature)
+hidapi = { version = "2.6", optional = true }
+cpal = { version = "0.15", optional = true }
+# BLE Vendor GATT (ble feature)
+btleplug = { version = "0.12", optional = true }
+futures-util = { version = "0.3", optional = true }
+# mSBC decoding for the BLE audio path. Separate crate because it is
+# LGPL-2.1-or-later while this crate is MIT — see the `ble` feature comment.
+msbc-decoder = { version = "0.1", path = "msbc-decoder", optional = true }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+hidapi = { version = "2.6", features = ["macos-shared-device"], optional = true }
+
+[dev-dependencies]
+tempfile = "3"
+env_logger = "0.11"
