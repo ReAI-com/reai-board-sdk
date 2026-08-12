@@ -1,9 +1,9 @@
-//! # ReAI Vibe Board Hardware SDK (V2)
+//! # ReAI-Vibe-Board Hardware SDK (V2)
 //!
 //! English:
 //! An embeddable Rust crate that encapsulates USB/BLE connectivity,
 //! auto-reconnect, the HID protocol, mSBC decoding, and USB Audio capture for
-//! the ReAI Vibe Board hardware family. Designed to be embedded into any host
+//! the ReAI-Vibe-Board hardware family. Designed to be embedded into any host
 //! application that needs to talk to the board.
 //!
 //! Product site: <https://b.reai.com>
@@ -26,7 +26,7 @@
 //!
 //! ## Hardware targets
 //! Protocol constants (USB VID/PID, BLE GATT service UUIDs, command opcodes)
-//! are tuned for the **ReAI Vibe Board** hardware family. See module-level docs
+//! are tuned for the **ReAI-Vibe-Board** hardware family. See module-level docs
 //! for details; they are not generic USB/BLE abstractions.
 
 pub mod dfu;

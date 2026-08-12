@@ -6,12 +6,12 @@
 [![Rust 1.87+](https://img.shields.io/badge/rust-1.87%2B-orange.svg)](#rust-版本要求)
 
 封装 **USB / BLE 连接、断线重连、HID 协议、mSBC 解码、USB Audio 采集**
-能力的 Rust crate，可嵌入任意应用。面向 **ReAI Vibe Board** —— 一块为 AI
+能力的 Rust crate，可嵌入任意应用。面向 **ReAI-Vibe-Board** —— 一块为 AI
 编程工作流设计的语音优先机械键盘。
 
 [产品官网](https://b.reai.com) | [English README](README.md) | [API 文档 (docs.rs)](https://docs.rs/reai-board-sdk) | [更新日志](CHANGELOG.md)
 
-![ReAI Vibe Board](https://raw.githubusercontent.com/ReAI-com/reai-board-sdk/v0.2.2/assets/board-unibody.webp)
+![ReAI-Vibe-Board](https://raw.githubusercontent.com/ReAI-com/reai-board-sdk/v0.3.0/assets/board-unibody.webp)
 
 ---
 
@@ -32,7 +32,7 @@ CNC 铝合金一体机身，带金属旋钮和三段式模式拨杆。SDK 实际
 
 | | | |
 |:-:|:-:|:-:|
-| ![金属旋钮](https://raw.githubusercontent.com/ReAI-com/reai-board-sdk/v0.2.2/assets/board-knob.webp) | ![双麦阵列](https://raw.githubusercontent.com/ReAI-com/reai-board-sdk/v0.2.2/assets/board-mic.webp) | ![段落感按键](https://raw.githubusercontent.com/ReAI-com/reai-board-sdk/v0.2.2/assets/board-keys.webp) |
+| ![金属旋钮](https://raw.githubusercontent.com/ReAI-com/reai-board-sdk/v0.3.0/assets/board-knob.webp) | ![双麦阵列](https://raw.githubusercontent.com/ReAI-com/reai-board-sdk/v0.3.0/assets/board-mic.webp) | ![段落感按键](https://raw.githubusercontent.com/ReAI-com/reai-board-sdk/v0.3.0/assets/board-keys.webp) |
 | 金属旋钮 | 双麦阵列 | 段落感按键 |
 
 ---
@@ -46,7 +46,7 @@ CNC 铝合金一体机身，带金属旋钮和三段式模式拨杆。SDK 实际
 - **三个事件入口**：`events()` 拿 `EventStream`（`recv().await` 可进 `tokio::select!`，`blocking_recv()` 给普通线程用）、`on_event()`（回调）、`subscribe()`（直接拿原始 `broadcast::Receiver` 自己驱动）。
 
 > 协议常量（USB VID/PID、BLE GATT service UUID、命令码、设备名前缀）针对
-> **ReAI Vibe Board** 硬件调优，**不是通用 USB/BLE 抽象**。
+> **ReAI-Vibe-Board** 硬件调优，**不是通用 USB/BLE 抽象**。
 
 ---
 
@@ -56,7 +56,7 @@ CNC 铝合金一体机身，带金属旋钮和三段式模式拨杆。SDK 实际
 
 ```toml
 [dependencies]
-reai-board-sdk = "0.2"
+reai-board-sdk = "0.3"
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "time", "sync"] }
 ```
 
@@ -140,14 +140,17 @@ SDK **不模拟、不注入键盘输入**，它只读设备上报并向设备发
 |--------------------|-------------------------------------------------------|--------|
 | `usb`              | `hidapi 2.6`（USB HID）+ `cpal 0.15`（USB Audio 采集）| ✅     |
 | `ble`              | `btleplug 0.12`（BLE GATT）+ `futures-util`           | ✅     |
-| `test-mode`        | 工厂测试命令（如 `shutdown_device(0x5E)`）            | ✅     |
+| `test-mode`        | 工厂测试命令（如 `shutdown_device(0x5E)`）            | ❌     |
 
 `BoardDeviceBlocking` 不需要额外 feature —— 开了 `usb` 或 `ble` 就自带。
+
+`test-mode` 默认不启用。只有可信的工厂或产测工具需要物理按键测试事件、设备关机
+命令时，才应显式开启。
 
 只用协议层、不要硬件依赖：
 
 ```toml
-reai-board-sdk = { version = "0.2", default-features = false, features = ["test-mode"] }
+reai-board-sdk = { version = "0.3", default-features = false, features = ["test-mode"] }
 ```
 
 ### Rust 版本要求
@@ -326,7 +329,8 @@ cargo run --example device_demo      # 读设备信息 / 按键配置 / 写回�
 cargo run --example listen_demo      # 两种事件门面并排演示
 ```
 
-所有 example 都需要连上设备；事件打到 stdout。
+所有 example 都需要连上设备；事件打到 stdout。若还要输出工厂原始物理按键事件，
+请额外带 `--features test-mode`。
 
 ---
 

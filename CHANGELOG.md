@@ -5,6 +5,23 @@ follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [0.3.0] — 2026-08-12
+
+### Changed
+
+- **Breaking:** `test-mode` is no longer enabled by default. Factory physical-key
+  events and device shutdown commands now require explicit
+  `features = ["test-mode"]` opt-in.
+- Public product naming is aligned to **ReAI-Vibe-Board** across package metadata,
+  README files, crate-level docs, and examples.
+- docs.rs builds with all features so opt-in factory APIs remain discoverable.
+- USB and BLE examples feature-gate their factory-event match arms alongside
+  the `test-mode` opt-in change.
+
+## [0.2.2] — 2026-08-09
+
+### Changed
+
 - First public release as an independent crate. Brand metadata, product
   website, README in English & Chinese, MIT LICENSE, and CI workflow added.
 - Documentation pass: device-command reference expanded to cover the full
@@ -32,8 +49,6 @@ follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
     `kernel::sink::MsbcDecoderSink` and `tool::msbc_file`. This is a
     deliberate narrowing of the API surface to keep the licence boundary
     enforceable at compile time.
-
-## [0.2.2] — 2026-08-09
 
 ### Added
 
@@ -87,7 +102,8 @@ follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   Audio capture and BLE Vendor GATT scan / connect / notify / mSBC
   decode.
 
-[Unreleased]: https://github.com/ReAI-com/reai-board-sdk/compare/v0.2.2...HEAD
+[Unreleased]: https://github.com/ReAI-com/reai-board-sdk/compare/v0.3.0...HEAD
+[0.3.0]: https://github.com/ReAI-com/reai-board-sdk/releases/tag/v0.3.0
 [0.2.2]: https://github.com/ReAI-com/reai-board-sdk/releases/tag/v0.2.2
 
 <!-- 0.1.0 – 0.2.1 predate the public repository and have no git tags. -->

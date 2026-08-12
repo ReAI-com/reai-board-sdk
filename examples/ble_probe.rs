@@ -39,7 +39,7 @@ async fn main() {
     println!("start(首次 BLE 可能等 CoreBluetooth adapter 预热 ~40s)...");
     device.start().await.expect("start 失败");
 
-    println!("=== ReAI Vibe Board BLE Probe ===");
+    println!("=== ReAI-Vibe-Board BLE Probe ===");
     println!("扫描 REAI_VB_ → 连接,验证按键/模式/音频 + 断线重连,Ctrl+C 退出\n");
 
     let mut events = device.events();
@@ -67,6 +67,7 @@ fn print_event(evt: &BoardEvent) {
         BoardEvent::ComboKey(c) => println!("[组合] keys={:?}", c.keys),
         BoardEvent::AiVoiceKey(a) => println!("[AI语音] pressed={}", a.pressed),
         BoardEvent::ModeChange(m) => println!("[模式] {} (0x{:02X})", m.mode, m.mode_value),
+        #[cfg(feature = "test-mode")]
         BoardEvent::FactoryKey(k) => println!(
             "[工厂物理键] session=0x{:04X} index={} pressed={} seq={}",
             k.session, k.input_index, k.pressed, k.sequence

@@ -43,6 +43,12 @@ jobs:
       - name: cargo fmt --check
         run: cargo fmt --all -- --check
 
+      - name: release readiness
+        run: ./scripts/check-release-readiness.sh
+
+      - name: cargo check default features and examples
+        run: cargo check --workspace --all-targets
+
       - name: cargo clippy
         run: cargo clippy --workspace --all-features --all-targets -- -D warnings
 

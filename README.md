@@ -7,12 +7,12 @@
 
 An embeddable Rust crate that encapsulates **USB / BLE connectivity,
 auto-reconnect, the HID protocol, mSBC decoding, and USB Audio capture** for
-the **ReAI Vibe Board** — a voice-first mechanical keyboard built for AI
+the **ReAI-Vibe-Board** — a voice-first mechanical keyboard built for AI
 coding workflows.
 
 [Product site](https://b.reai.com) | [中文文档](README.zh-CN.md) | [API docs (docs.rs)](https://docs.rs/reai-board-sdk) | [Changelog](CHANGELOG.md)
 
-![ReAI Vibe Board](https://raw.githubusercontent.com/ReAI-com/reai-board-sdk/v0.2.2/assets/board-unibody.webp)
+![ReAI-Vibe-Board](https://raw.githubusercontent.com/ReAI-com/reai-board-sdk/v0.3.0/assets/board-unibody.webp)
 
 ---
 
@@ -34,7 +34,7 @@ three for the knob, six for the keys, three for the lever.
 
 | | | |
 |:-:|:-:|:-:|
-| ![Knob](https://raw.githubusercontent.com/ReAI-com/reai-board-sdk/v0.2.2/assets/board-knob.webp) | ![Dual mic](https://raw.githubusercontent.com/ReAI-com/reai-board-sdk/v0.2.2/assets/board-mic.webp) | ![Keys](https://raw.githubusercontent.com/ReAI-com/reai-board-sdk/v0.2.2/assets/board-keys.webp) |
+| ![Knob](https://raw.githubusercontent.com/ReAI-com/reai-board-sdk/v0.3.0/assets/board-knob.webp) | ![Dual mic](https://raw.githubusercontent.com/ReAI-com/reai-board-sdk/v0.3.0/assets/board-mic.webp) | ![Keys](https://raw.githubusercontent.com/ReAI-com/reai-board-sdk/v0.3.0/assets/board-keys.webp) |
 | Metal knob | Dual-mic array | Tactile keys |
 
 ---
@@ -58,7 +58,7 @@ three for the knob, six for the keys, three for the lever.
   `broadcast::Receiver` if you want to drive it yourself.
 
 > The protocol constants (USB VID/PID, BLE GATT service UUIDs, command opcodes,
-> device-name prefix) are tuned for **ReAI Vibe Board** hardware. They are not
+> device-name prefix) are tuned for **ReAI-Vibe-Board** hardware. They are not
 > generic USB/BLE abstractions.
 
 ---
@@ -69,7 +69,7 @@ Add to your `Cargo.toml`:
 
 ```toml
 [dependencies]
-reai-board-sdk = "0.2"
+reai-board-sdk = "0.3"
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "time", "sync"] }
 ```
 
@@ -157,14 +157,17 @@ device state. See [Security notes](#security-notes).
 |--------------------|----------------------------------------------------------|----------|
 | `usb`              | `hidapi 2.6` (USB HID) + `cpal 0.15` (USB Audio capture) | ✅       |
 | `ble`              | `btleplug 0.12` (BLE GATT) + `futures-util`              | ✅       |
-| `test-mode`        | Factory test commands (e.g. `shutdown_device(0x5E)`)     | ✅       |
+| `test-mode`        | Factory test commands (e.g. `shutdown_device(0x5E)`)     | ❌       |
 
 `BoardDeviceBlocking` needs no feature flag — it ships with `usb` or `ble`.
+
+`test-mode` is opt-in. Enable it only for trusted factory or production-test
+tools that need physical-key test events or device shutdown commands.
 
 To use only the protocol layer with no hardware deps:
 
 ```toml
-reai-board-sdk = { version = "0.2", default-features = false, features = ["test-mode"] }
+reai-board-sdk = { version = "0.3", default-features = false, features = ["test-mode"] }
 ```
 
 ### Rust version
@@ -350,7 +353,8 @@ cargo run --example device_demo      # read device info / key config / round-tri
 cargo run --example listen_demo      # both event facade flavors side-by-side
 ```
 
-All examples need a board connected; they print events to stdout.
+All examples need a board connected; they print events to stdout. Add
+`--features test-mode` when you also need factory physical-key events.
 
 ---
 

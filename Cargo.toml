@@ -3,12 +3,12 @@ members = ["msbc-decoder"]
 
 [package]
 name = "reai-board-sdk"
-version = "0.2.2"
+version = "0.3.0"
 edition = "2021"
 rust-version = "1.87"
 authors = ["ReAI Team"]
 license = "MIT"
-description = "ReAI Vibe Board keyboard SDK — USB/BLE connectivity, auto-reconnect, HID protocol, mSBC decoding, USB Audio capture"
+description = "ReAI-Vibe-Board keyboard SDK — USB/BLE connectivity, auto-reconnect, HID protocol, mSBC decoding, USB Audio capture"
 repository = "https://github.com/ReAI-com/reai-board-sdk"
 homepage = "https://b.reai.com"
 documentation = "https://docs.rs/reai-board-sdk"
@@ -19,9 +19,12 @@ categories = ["api-bindings", "hardware-support"]
 # 产品配图仅用于 GitHub / crates.io 页面展示，不进 crate 包
 exclude = ["assets/*"]
 
+[package.metadata.docs.rs]
+all-features = true
+
 [features]
-# Default: full feature set (USB + BLE + test-mode)
-default = ["usb", "ble", "test-mode"]
+# Default: end-user transports only. Factory commands require explicit opt-in.
+default = ["usb", "ble"]
 # USB HID + cpal USB Audio capture
 usb = ["dep:hidapi", "dep:cpal"]
 # BLE Vendor GATT (btleplug native async) + mSBC decoding.

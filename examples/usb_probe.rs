@@ -8,7 +8,7 @@
 //!
 //! 简体中文：
 //! USB 真机冒烟验证：HID 事件 + USB Audio PCM 两条数据流 + 断线重连。
-//! 需要：USB 连接 ReAI Vibe Board（VID=0x363C, PID=0xED20）。
+//! 需要：USB 连接 ReAI-Vibe-Board（VID=0x363C, PID=0xED20）。
 //! SDK 是纯数据采集层：读 HID（Config `0xFFA0` / Consumer `0x000C`）+ USB Audio，
 //! **不注入系统输入**，因此不需要「辅助功能」。理论上也不需要「输入监控」
 //! （那是 macOS 对**标准键盘 Usage 0x0007** 的保护；本设备按键走 vendor `0xFFA0`
@@ -37,7 +37,7 @@ async fn main() {
 
     device.start().await.expect("start 失败");
 
-    println!("=== ReAI Vibe Board USB Probe ===");
+    println!("=== ReAI-Vibe-Board USB Probe ===");
     println!("HID 事件 + USB Audio PCM 同时监测,拔插验证断线重连,Ctrl+C 退出\n");
 
     let mut events = device.events();
@@ -65,6 +65,7 @@ fn print_event(evt: &BoardEvent) {
         BoardEvent::ComboKey(c) => println!("[组合] keys={:?}", c.keys),
         BoardEvent::AiVoiceKey(a) => println!("[AI语音] pressed={}", a.pressed),
         BoardEvent::ModeChange(m) => println!("[模式] {} (0x{:02X})", m.mode, m.mode_value),
+        #[cfg(feature = "test-mode")]
         BoardEvent::FactoryKey(k) => println!(
             "[工厂物理键] session=0x{:04X} index={} pressed={} seq={}",
             k.session, k.input_index, k.pressed, k.sequence
