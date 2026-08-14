@@ -13,7 +13,8 @@ use std::time::Duration;
 use anyhow::{anyhow, Result};
 
 use crate::kernel::protocol_hid::{
-    is_target_pid, parse_usb_audio_report, PACKET_SIZE, PID_USB, USAGE_PAGE_AUDIO, VID,
+    is_target_pid, parse_usb_audio_report, PACKET_SIZE, PID_USB, REPORT_ID_INPUT,
+    REPORT_ID_KEY_EVENT, USAGE_PAGE_AUDIO, VID,
 };
 use crate::kernel::sink::{AudioFrameSink, EncodedAudioDecoderSink};
 use crate::runtime::hotplug::spawn_blocking_with_runloop;
@@ -147,6 +148,10 @@ impl UsbVendorAudioReader {
                     };
                     match parse_usb_audio_report(&queued.report) {
                         Some(packet) => decoder.on_packet(packet, queued.local_drop_packets),
+                        // Config(0xFFA0) 与 Audio(0xFFAA) 共用同一条物理 HID 接口，
+                        // 命令响应和按键事件也会流到这里。它们不是坏掉的音频包，
+                        // 当成解析失败报警只会把排障的人往错方向带。
+                        None if matches!(queued.report[0], REPORT_ID_INPUT | REPORT_ID_KEY_EVENT) => {}
                         None => {
                             parse_failures = parse_failures.saturating_add(1);
                             if parse_failures <= 3 || parse_failures.is_multiple_of(100) {
