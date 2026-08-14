@@ -52,6 +52,10 @@ pub const REPORT_ID_KEY_EVENT: u8 = 0x02;
 #[allow(dead_code)]
 pub const REPORT_ID_AUDIO: u8 = 0xB1;
 
+pub const AUDIO_ENVELOPE_VERSION: u8 = 1;
+pub const AUDIO_FLAG_DATA: u8 = 0x01;
+pub const AUDIO_FLAG_DISCONTINUITY: u8 = 0x02;
+
 // ============ 命令码 ============
 
 /// 获取按键配置命令
@@ -122,6 +126,12 @@ pub const CMD_AI_READ_BINDINGS_BLOB: u8 = 0x69;
 /// 写分片 `[offset(2 LE)][chunk(≤56)]` 应答 ack；offset=0xFFFF 为 commit：
 /// `[0xFFFF][total_len(2)][crc16(2)]`，固件校验齐全+CRC 后落盘并回读校验。
 pub const CMD_AI_WRITE_BINDINGS_BLOB: u8 = 0x6A;
+
+/// Versioned board-audio capability query (firmware 1.59+).
+pub const CMD_AI_GET_AUDIO_CAPABILITIES: u8 = 0x6E;
+
+/// Volatile short-TTL audio stream lease control (firmware 1.59+).
+pub const CMD_AI_AUDIO_STREAM_CONTROL: u8 = 0x6F;
 
 /// 工厂物理按键测试控制（固件 v1.58+）。
 #[cfg(feature = "test-mode")]
@@ -529,6 +539,39 @@ impl HidPacket {
         packet
     }
 
+    pub fn get_audio_capabilities() -> [u8; PACKET_SIZE] {
+        let mut packet = [0u8; PACKET_SIZE];
+        packet[0] = REPORT_ID_OUTPUT;
+        packet[1] = CMD_AI_GET_AUDIO_CAPABILITIES;
+        packet
+    }
+
+    pub fn audio_stream_control(
+        action: crate::kernel::audio::AudioStreamAction,
+        transport: crate::kernel::audio::AudioTransport,
+        scope: crate::kernel::audio::AudioStreamScope,
+        lease_id: u32,
+        ttl_ms: u16,
+    ) -> Option<[u8; PACKET_SIZE]> {
+        let transport_mask = match transport {
+            crate::kernel::audio::AudioTransport::UsbVendorHid => 0x01,
+            crate::kernel::audio::AudioTransport::BleGatt => 0x02,
+            crate::kernel::audio::AudioTransport::UsbUac
+            | crate::kernel::audio::AudioTransport::System => return None,
+        };
+        let mut packet = [0u8; PACKET_SIZE];
+        packet[0] = REPORT_ID_OUTPUT;
+        packet[1] = CMD_AI_AUDIO_STREAM_CONTROL;
+        packet[2] = 10;
+        packet[3] = action as u8;
+        packet[4] = transport_mask;
+        packet[5] = scope as u8;
+        packet[6] = crate::kernel::audio::AUDIO_PROTOCOL_VERSION;
+        packet[7..11].copy_from_slice(&lease_id.to_le_bytes());
+        packet[11..13].copy_from_slice(&ttl_ms.to_le_bytes());
+        Some(packet)
+    }
+
     /// 创建 SET 按键配置命令
     pub fn set_key_config(key_data: &[u8; KEY_DATA_LEN]) -> [u8; PACKET_SIZE] {
         let mut packet = [0u8; PACKET_SIZE];
@@ -847,6 +890,133 @@ pub fn parse_silent_record_hid_response(response: &[u8], expected_cmd: u8) -> Op
         return None;
     }
     Some(response[4] != 0)
+}
+
+/// Parse `[report, 0x6E, len=13, result, protocol, caps u32, envelope,
+/// usb_max, ble_max, default_ttl u16, max_ttl u16]`.
+pub fn parse_audio_capabilities_hid_response(
+    response: &[u8],
+) -> Option<crate::kernel::audio::AudioCapabilities> {
+    if response.len() < 16
+        || response[0] != REPORT_ID_INPUT
+        || response[1] != CMD_AI_GET_AUDIO_CAPABILITIES
+        || response[2] != 13
+        || response[3] != 0
+    {
+        return None;
+    }
+    parse_audio_capabilities_payload(&response[4..16])
+}
+
+/// Parse the GATT response equivalent without the HID report id.
+pub fn parse_audio_capabilities_gatt_response(
+    response: &[u8],
+) -> Option<crate::kernel::audio::AudioCapabilities> {
+    if response.len() < 15
+        || response[0] != CMD_AI_GET_AUDIO_CAPABILITIES
+        || response[1] != 13
+        || response[2] != 0
+    {
+        return None;
+    }
+    parse_audio_capabilities_payload(&response[3..15])
+}
+
+fn parse_audio_capabilities_payload(
+    payload: &[u8],
+) -> Option<crate::kernel::audio::AudioCapabilities> {
+    if payload.len() < 12 {
+        return None;
+    }
+    let bits = u32::from_le_bytes(payload[1..5].try_into().ok()?);
+    Some(crate::kernel::audio::AudioCapabilities::from_bits(
+        payload[0],
+        bits,
+        payload[5],
+        payload[6],
+        payload[7],
+        u16::from_le_bytes([payload[8], payload[9]]),
+        u16::from_le_bytes([payload[10], payload[11]]),
+    ))
+}
+
+pub fn parse_audio_stream_hid_response(
+    response: &[u8],
+) -> Option<crate::kernel::audio::AudioStreamState> {
+    if response.len() < 13
+        || response[0] != REPORT_ID_INPUT
+        || response[1] != CMD_AI_AUDIO_STREAM_CONTROL
+        || response[2] != 10
+    {
+        return None;
+    }
+    parse_audio_stream_payload(response[3], &response[4..13])
+}
+
+pub fn parse_audio_stream_gatt_response(
+    response: &[u8],
+) -> Option<crate::kernel::audio::AudioStreamState> {
+    if response.len() < 12 || response[0] != CMD_AI_AUDIO_STREAM_CONTROL || response[1] != 10 {
+        return None;
+    }
+    parse_audio_stream_payload(response[2], &response[3..12])
+}
+
+fn parse_audio_stream_payload(
+    result: u8,
+    payload: &[u8],
+) -> Option<crate::kernel::audio::AudioStreamState> {
+    use crate::kernel::audio::{AudioStreamResult, AudioStreamScope, AudioTransport};
+    if payload.len() < 9 {
+        return None;
+    }
+    let result = AudioStreamResult::try_from(result).ok()?;
+    let active_transport = match payload[1] {
+        0 => None,
+        1 => Some(AudioTransport::UsbVendorHid),
+        2 => Some(AudioTransport::BleGatt),
+        _ => return None,
+    };
+    let scope = match payload[2] {
+        0 => None,
+        1 => Some(AudioStreamScope::Session),
+        2 => Some(AudioStreamScope::Timeline),
+        _ => return None,
+    };
+    Some(crate::kernel::audio::AudioStreamState {
+        result,
+        protocol_version: payload[0],
+        active_transport,
+        scope,
+        lease_id: u32::from_le_bytes(payload[3..7].try_into().ok()?),
+        ttl_ms: u16::from_le_bytes([payload[7], *payload.get(8)?]),
+    })
+}
+
+pub fn parse_usb_audio_report(
+    report: &[u8],
+) -> Option<crate::kernel::audio::EncodedAudioPacket<'_>> {
+    if report.len() != PACKET_SIZE
+        || report[0] != REPORT_ID_AUDIO
+        || report[1] != AUDIO_ENVELOPE_VERSION
+        || report[2] & AUDIO_FLAG_DATA == 0
+        || report[2] & !(AUDIO_FLAG_DATA | AUDIO_FLAG_DISCONTINUITY) != 0
+    {
+        return None;
+    }
+    let payload_len = report[5] as usize;
+    if payload_len == 0
+        || payload_len > MSBC_FRAME_SIZE
+        || !payload_len.is_multiple_of(MSBC_FRAME_SIZE)
+    {
+        return None;
+    }
+    Some(crate::kernel::audio::EncodedAudioPacket {
+        payload: &report[6..6 + payload_len],
+        transport: crate::kernel::audio::AudioTransport::UsbVendorHid,
+        sequence: Some(u16::from_le_bytes([report[3], report[4]])),
+        device_discontinuity: report[2] & AUDIO_FLAG_DISCONTINUITY != 0,
+    })
 }
 
 /// 解析 GATT 静默录音响应：`[cmd, len, result, enabled]`。

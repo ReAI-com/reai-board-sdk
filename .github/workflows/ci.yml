@@ -43,6 +43,12 @@ jobs:
       - name: cargo fmt --check
         run: cargo fmt --all -- --check
 
+      - name: release readiness
+        run: ./scripts/check-release-readiness.sh
+
+      - name: cargo check default features and examples
+        run: cargo check --workspace --all-targets
+
       - name: cargo clippy
         run: cargo clippy --workspace --all-features --all-targets -- -D warnings
 
@@ -51,6 +57,46 @@ jobs:
 
       - name: cargo test
         run: cargo test --workspace --all-features --verbose
+
+  features:
+    name: feature matrix (${{ matrix.name }})
+    runs-on: ubuntu-latest
+    # Single-transport builds still carry pre-existing dead-code / unused-import
+    # lints. This job's job is to prove every advertised configuration actually
+    # compiles — the `check` job above is the one that keeps warnings at zero.
+    env:
+      RUSTFLAGS: ""
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # The LGPL-free build the README promises. Examples need a transport,
+          # so this one is library-only by design.
+          - name: protocol only
+            flags: --no-default-features --lib
+          - name: usb
+            flags: --no-default-features --features usb --all-targets
+          - name: ble
+            flags: --no-default-features --features ble --all-targets
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Install Linux system deps
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libdbus-1-dev libudev-dev libasound2-dev pkg-config
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo registry & target
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            .
+
+      - name: cargo check
+        run: cargo check ${{ matrix.flags }}
 
   doc:
     name: doc

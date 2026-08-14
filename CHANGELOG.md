@@ -5,6 +5,106 @@ follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [0.3.0] — 2026-08-13
+
+### Added
+
+- **Board-first versioned audio transport (firmware v1.59+).** The board's own
+  microphone now streams over the vendor transports — USB Vendor HID or BLE
+  GATT — as ordinary device data. No OS audio device is opened, so the default
+  audio path no longer involves a microphone permission prompt.
+  - `query_audio_capabilities()` (0x6E) reports capabilities as **feature bits**.
+    Nothing is inferred from "the firmware looks new enough".
+  - `start_board_audio()` / `control_audio_stream()` (0x6F) take a `Session` or
+    `Timeline` lease with a TTL, renewed with `AudioStreamAction::Heartbeat`.
+  - `AudioRouteRequest::BoardFirst` resolves strictly against those bits and
+    fails loudly when no vendor transport is available. It never silently falls
+    back to a host microphone.
+  - `AudioFrame` unifies both transports on 16 kHz mono f32 and carries the
+    transport, connection epoch, on-wire sequence, and three independent loss
+    signals (device discontinuity, sequence gap, local drop).
+  - The USB vendor-audio reader owns a separate `hidapi` handle plus dedicated
+    reader/decode threads and a bounded drop-oldest queue, so it is unaffected
+    by the config monitor's pause guard.
+  - BLE FE63 accepts both the v1 sequence envelope and the older session-only
+    envelope.
+
+### Changed
+
+- **Breaking:** `AudioFrameSink::on_msbc_frame(&[u8])` became
+  `on_audio_frame(AudioFrame<'_>)`. The sink now receives decoded PCM together
+  with transport and continuity metadata rather than raw 57-byte mSBC frames,
+  and `MsbcDecoderSink` is now `EncodedAudioDecoderSink`.
+- **Breaking:** connecting, probing, or registering a `PcmSink` no longer
+  enumerates or opens a CoreAudio / WASAPI input device. The USB Audio Class
+  path is now reachable only through the explicit `start_usb_uac_compat()`.
+- **Breaking — BLE audio no longer starts on its own.** In 0.2.x, connecting over
+  BLE and registering a sink was enough to receive audio. The GATT audio stream
+  now starts disabled and is opened only by `start_board_audio_reader()` (or
+  `start_legacy_ble_session_reader()` for pre-v1.59 firmware). Upgrading without
+  adding that call means the sink is simply never invoked — audio goes silent
+  with no error. Migration:
+
+  ```rust
+  // 0.2.x — audio began flowing on its own
+  device.set_pcm_sink(sink);
+  device.start().await?;
+
+  // 0.3.0 — the stream is requested explicitly
+  device.set_pcm_sink(sink);
+  device.start().await?;
+  let caps = device.query_audio_capabilities().await?;
+  let transport = reai_board_sdk::kernel::audio::resolve_audio_transport(
+      AudioRouteRequest::BoardFirst,
+      device.connection(),
+      &caps,
+  ).expect("no vendor audio transport");
+  device.start_board_audio(transport, AudioStreamScope::Session, lease_id, ttl_ms).await?;
+  ```
+- **Licensing:** board audio is mSBC on every transport, so the `usb` feature
+  pulls in the LGPL-2.1-or-later `msbc-decoder` exactly like `ble` does. The
+  LGPL-free build is now `default-features = false` (protocol layer only). Board
+  audio remains an entirely optional feature — without it the keyboard still
+  provides key mapping, the mode lever, the knob, device configuration and DFU,
+  and users keep their system microphone and any dictation tool they already use.
+- Examples now depend on tokio's `signal` feature through dev-dependencies, so
+  `cargo run --example …` builds without adding the signal driver to the library.
+- CI builds every advertised feature configuration (protocol-only, `usb`, `ble`),
+  which the default/all-features jobs did not cover.
+
+### Fixed
+
+- A device-announced discontinuity now resets the sequence tracker. Without it, a
+  firmware-side encoder restart inside a live lease left every following packet
+  looking out-of-order, so audio went silent — potentially for tens of thousands
+  of packets — with nothing in the log.
+- One undecodable frame no longer discards the good frames beside it in the same
+  packet. Legacy BLE envelopes can truncate their payload, which used to turn
+  every truncated packet into a total loss — worse than the pre-0.3.0 behaviour.
+- Frames lost to decoding are now reported through `local_drop_frames`. They used
+  to vanish with all three loss signals clear, leaving consumers no reason to
+  reset their own VAD state.
+- `BoardDeviceBlocking` can now start board audio. It forwarded the sink setters
+  but none of the start methods, so a registered sink was never invoked and there
+  was no way out within that API.
+- Switching transports validates before it acts. Requesting an unsupported
+  transport used to tear down the running reader first and then return an error,
+  leaving the caller believing nothing had happened.
+- USB vendor-audio parse failures and short reads are logged (rate-limited).
+  They were silent, so the symptom was "no audio and no error".
+- **Breaking:** `test-mode` is no longer enabled by default. Factory physical-key
+  events and device shutdown commands now require explicit
+  `features = ["test-mode"]` opt-in.
+- Public product naming is aligned to **ReAI-Vibe-Board** across package metadata,
+  README files, crate-level docs, and examples.
+- docs.rs builds with all features so opt-in factory APIs remain discoverable.
+- USB and BLE examples feature-gate their factory-event match arms alongside
+  the `test-mode` opt-in change.
+
+## [0.2.2] — 2026-08-09
+
+### Changed
+
 - First public release as an independent crate. Brand metadata, product
   website, README in English & Chinese, MIT LICENSE, and CI workflow added.
 - Documentation pass: device-command reference expanded to cover the full
@@ -32,8 +132,6 @@ follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
     `kernel::sink::MsbcDecoderSink` and `tool::msbc_file`. This is a
     deliberate narrowing of the API surface to keep the licence boundary
     enforceable at compile time.
-
-## [0.2.2] — 2026-08-09
 
 ### Added
 
@@ -87,7 +185,8 @@ follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   Audio capture and BLE Vendor GATT scan / connect / notify / mSBC
   decode.
 
-[Unreleased]: https://github.com/ReAI-com/reai-board-sdk/compare/v0.2.2...HEAD
+[Unreleased]: https://github.com/ReAI-com/reai-board-sdk/compare/v0.3.0...HEAD
+[0.3.0]: https://github.com/ReAI-com/reai-board-sdk/releases/tag/v0.3.0
 [0.2.2]: https://github.com/ReAI-com/reai-board-sdk/releases/tag/v0.2.2
 
 <!-- 0.1.0 – 0.2.1 predate the public repository and have no git tags. -->

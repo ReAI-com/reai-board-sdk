@@ -9,22 +9,21 @@
 //! 共享模型:`Arc<BoardDeviceCore>`,HotplugManager 的回调用 `Arc::clone` 捕获,
 //! 跨 `tokio::spawn` 存活。故 `start` / `disconnect` 等需 spawn 的方法接收 `self: &Arc<Self>`。
 
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use anyhow::Result;
 use tokio::sync::broadcast;
 
+use crate::kernel::audio::{
+    AudioCapabilities, AudioStreamAction, AudioStreamScope, AudioStreamState, AudioTransport,
+};
 use crate::kernel::event::{
     BoardEvent, ConnectionEvent, DeviceInfo, DisconnectReason, ModeChangeEvent, ModeSource,
 };
 use crate::kernel::protocol_hid::*;
-use crate::kernel::sink::{AudioFrameSink, PcmSink};
-// mSBC 解码只在 BLE 音频路径用；解码器在 LGPL 的 msbc-decoder crate 里，
-// 不开 ble 就不引入。
-#[cfg(feature = "ble")]
-use crate::kernel::sink::{CountingSink, MsbcDecoderSink};
+use crate::kernel::sink::{AudioFrameSink, CountingSink, PcmAudioFrameAdapter, PcmSink};
 use crate::kernel::types::ConnectionType;
 use crate::runtime::hotplug::{spawn_blocking_with_runloop, HotplugConfig, HotplugManager};
 use crate::tool::parse::{parse_device_info_from_buf, parse_device_info_from_gatt};
@@ -33,6 +32,7 @@ use crate::tool::parse::{parse_device_info_from_buf, parse_device_info_from_gatt
 use {
     crate::runtime::usb::device_manager::DeviceConnection,
     crate::runtime::usb_capture::UsbAudioCapture,
+    crate::runtime::usb_hid_audio::UsbVendorAudioReader,
 };
 
 #[cfg(feature = "ble")]
@@ -76,6 +76,12 @@ pub struct BoardDeviceCore {
     pcm_sink: Mutex<Option<Arc<dyn PcmSink>>>,
     #[cfg(feature = "usb")]
     usb_capture: Mutex<Option<UsbAudioCapture>>,
+    #[cfg(feature = "usb")]
+    usb_hid_audio: Mutex<Option<UsbVendorAudioReader>>,
+    audio_capabilities: Mutex<AudioCapabilities>,
+    active_audio_transport: Mutex<Option<AudioTransport>>,
+    audio_stream_state: Mutex<Option<AudioStreamState>>,
+    audio_connection_epoch: AtomicU64,
 }
 
 impl BoardDeviceCore {
@@ -107,6 +113,12 @@ impl BoardDeviceCore {
             pcm_sink: Mutex::new(None),
             #[cfg(feature = "usb")]
             usb_capture: Mutex::new(None),
+            #[cfg(feature = "usb")]
+            usb_hid_audio: Mutex::new(None),
+            audio_capabilities: Mutex::new(AudioCapabilities::default()),
+            active_audio_transport: Mutex::new(None),
+            audio_stream_state: Mutex::new(None),
+            audio_connection_epoch: AtomicU64::new(0),
         })
     }
 
@@ -119,12 +131,12 @@ impl BoardDeviceCore {
     // sink / BLE 配置(同步,无 IO;须在 start 前调)
     // ================================================================
 
-    /// 设置 PCM sink(USB Audio 直送;BLE mSBC 经 MsbcDecoderSink 解码后送)
+    /// 设置 PCM sink(板载 mSBC 经 EncodedAudioDecoderSink 解码后送;UAC 兼容路径直送)
     pub fn set_pcm_sink(&self, sink: Arc<dyn PcmSink>) {
         *self.pcm_sink.lock().unwrap() = Some(sink);
     }
 
-    /// 设置 BLE 原始 mSBC 帧 sink(优先于 pcm_sink,不解码)
+    /// 设置解码后的 AudioFrame sink(优先于 pcm_sink,额外带传输与连续性信息)
     pub fn set_audio_frame_sink(&self, sink: Arc<dyn AudioFrameSink>) {
         *self.audio_frame_sink.lock().unwrap() = Some(sink);
     }
@@ -175,6 +187,14 @@ impl BoardDeviceCore {
         self.connection().is_some()
     }
 
+    pub fn audio_capabilities(&self) -> AudioCapabilities {
+        *self.audio_capabilities.lock().unwrap()
+    }
+
+    pub fn active_audio_transport(&self) -> Option<AudioTransport> {
+        *self.active_audio_transport.lock().unwrap()
+    }
+
     /// 当前是否启用 BLE 自动重连
     pub fn auto_reconnect(&self) -> bool {
         #[cfg(feature = "ble")]
@@ -212,34 +232,26 @@ impl BoardDeviceCore {
         // 组装 HotplugManager
         let mut hotplug = HotplugManager::new(self.event_tx.clone(), self.hotplug_config.clone());
 
-        // on_connection_change:更新 connection_type + USB Audio 联动
+        // on_connection_change:更新 connection_type。任何音频 endpoint 都只由显式
+        // start_audio_stream/start_usb_uac 调用打开；连接本身绝不触发 cpal/UAC。
         let inner = self.clone();
         hotplug = hotplug.on_connection_change(Box::new(move |ct| {
-            *inner.connection_type.lock().unwrap() = ct;
+            let previous = {
+                let mut connection = inner.connection_type.lock().unwrap();
+                let previous = *connection;
+                *connection = ct;
+                previous
+            };
+            if ct.is_some() && previous != ct {
+                inner.audio_connection_epoch.fetch_add(1, Ordering::SeqCst);
+            }
+            if previous.is_some() && previous != ct {
+                inner.stop_local_audio_reader();
+                *inner.audio_stream_state.lock().unwrap() = None;
+                *inner.audio_capabilities.lock().unwrap() = AudioCapabilities::default();
+            }
             match ct {
                 Some(ConnectionType::Usb) => {
-                    // USB 连接:启 USB Audio 采集(若有 pcm_sink)
-                    #[cfg(feature = "usb")]
-                    {
-                        // shutdown 与热插拔回调可能并发；停止后禁止回调重新占用 UAC。
-                        if !inner.started.load(Ordering::SeqCst) {
-                            return;
-                        }
-                        let pcm = inner.pcm_sink.lock().unwrap().clone();
-                        if let Some(pcm) = pcm {
-                            let mut slot = inner.usb_capture.lock().unwrap();
-                            // 重复 Connection(Some(Usb)) 不能覆盖仍在运行的 capture；
-                            // UsbAudioCapture 没有 detach 语义，覆盖句柄会泄漏采集线程。
-                            if slot.is_none() {
-                                let cap = UsbAudioCapture::new(pcm);
-                                if let Err(e) = cap.start() {
-                                    log::warn!(target: "audio", "USB Audio 采集启动失败: {}", e);
-                                } else {
-                                    *slot = Some(cap);
-                                }
-                            }
-                        }
-                    }
                     // USB 连接就绪后 best-effort 查一次工作模式：
                     // monitor_paused/config_conn 已由 on_monitor_ready 设置，
                     // 直接 spawn 一个查询任务，失败只 warn 不影响连接。
@@ -310,13 +322,19 @@ impl BoardDeviceCore {
                     });
                 }
                 _ => {
-                    // 断开:停 USB Audio 采集
+                    // 断开:释放所有本地 audio reader/capture，清 capability/route。
                     #[cfg(feature = "usb")]
                     {
                         if let Some(cap) = inner.usb_capture.lock().unwrap().take() {
                             cap.stop();
                         }
+                        if let Some(reader) = inner.usb_hid_audio.lock().unwrap().take() {
+                            reader.stop();
+                        }
                     }
+                    *inner.active_audio_transport.lock().unwrap() = None;
+                    *inner.audio_stream_state.lock().unwrap() = None;
+                    *inner.audio_capabilities.lock().unwrap() = AudioCapabilities::default();
                 }
             }
         }));
@@ -368,7 +386,12 @@ impl BoardDeviceCore {
             if let Some(cap) = self.usb_capture.lock().unwrap().take() {
                 cap.stop();
             }
+            if let Some(reader) = self.usb_hid_audio.lock().unwrap().take() {
+                reader.stop();
+            }
         }
+        *self.active_audio_transport.lock().unwrap() = None;
+        *self.audio_stream_state.lock().unwrap() = None;
     }
 
     /// 主动断开当前连接。
@@ -812,6 +835,268 @@ impl BoardDeviceCore {
         Ok(())
     }
 
+    /// Query versioned board-audio capabilities. Unsupported/old firmware returns an error;
+    /// callers must not infer support from being "latest" or silently fall back to UAC.
+    pub async fn query_audio_capabilities(&self) -> Result<AudioCapabilities> {
+        let connection = self
+            .connection()
+            .ok_or_else(|| anyhow::anyhow!("设备未连接"))?;
+        let packet = HidPacket::get_audio_capabilities();
+        let capabilities = match connection {
+            #[cfg(feature = "usb")]
+            ConnectionType::Usb => {
+                let (length, response) = self.cmd_via_fresh_usb(packet).await?;
+                parse_audio_capabilities_hid_response(&response[..length])
+            }
+            #[cfg(not(feature = "usb"))]
+            ConnectionType::Usb => None,
+            #[cfg(feature = "ble")]
+            ConnectionType::Ble => {
+                let response = self
+                    .cmd_via_gatt(&packet, CMD_AI_GET_AUDIO_CAPABILITIES)
+                    .await?;
+                parse_audio_capabilities_gatt_response(&response)
+            }
+            #[cfg(not(feature = "ble"))]
+            ConnectionType::Ble => None,
+        }
+        .ok_or_else(|| anyhow::anyhow!("固件不支持版本化板载音频 capability"))?;
+        *self.audio_capabilities.lock().unwrap() = capabilities;
+        Ok(capabilities)
+    }
+
+    /// Start/heartbeat/stop a firmware stream lease. This API supports board transports only;
+    /// it cannot open CoreAudio/WASAPI endpoints.
+    pub async fn control_audio_stream(
+        &self,
+        action: AudioStreamAction,
+        transport: AudioTransport,
+        scope: AudioStreamScope,
+        lease_id: u32,
+        ttl_ms: u16,
+    ) -> Result<AudioStreamState> {
+        if lease_id == 0 {
+            return Err(anyhow::anyhow!("audio lease_id 不能为 0"));
+        }
+        let packet = HidPacket::audio_stream_control(action, transport, scope, lease_id, ttl_ms)
+            .ok_or_else(|| anyhow::anyhow!("系统/UAC 输入不使用固件 stream lease"))?;
+        let response = match self.connection() {
+            #[cfg(feature = "usb")]
+            Some(ConnectionType::Usb) => {
+                let (length, response) = self.cmd_via_fresh_usb(packet).await?;
+                parse_audio_stream_hid_response(&response[..length])
+            }
+            #[cfg(not(feature = "usb"))]
+            Some(ConnectionType::Usb) => None,
+            #[cfg(feature = "ble")]
+            Some(ConnectionType::Ble) => {
+                let response = self
+                    .cmd_via_gatt(&packet, CMD_AI_AUDIO_STREAM_CONTROL)
+                    .await?;
+                parse_audio_stream_gatt_response(&response)
+            }
+            #[cfg(not(feature = "ble"))]
+            Some(ConnectionType::Ble) => None,
+            None => return Err(anyhow::anyhow!("设备未连接")),
+        }
+        .ok_or_else(|| anyhow::anyhow!("audio stream-control 响应无效"))?;
+        if response.result != crate::kernel::audio::AudioStreamResult::Ok {
+            if response.result == crate::kernel::audio::AudioStreamResult::LeaseMismatch
+                && action != AudioStreamAction::Start
+            {
+                *self.audio_stream_state.lock().unwrap() = None;
+                self.stop_local_audio_reader();
+            }
+            return Err(anyhow::anyhow!(
+                "audio stream-control 被固件拒绝: {:?}",
+                response.result
+            ));
+        }
+        if !response.matches_request(action, transport, scope, lease_id) {
+            return Err(anyhow::anyhow!(
+                "audio stream-control 回包与请求 owner/scope/lease 不一致"
+            ));
+        }
+        match action {
+            AudioStreamAction::Start | AudioStreamAction::Heartbeat => {
+                *self.audio_stream_state.lock().unwrap() = Some(response);
+            }
+            AudioStreamAction::Stop => {
+                *self.audio_stream_state.lock().unwrap() = None;
+                self.stop_local_audio_reader();
+            }
+        }
+        Ok(response)
+    }
+
+    /// Open the selected local reader only after a successful firmware START lease.
+    pub async fn start_board_audio_reader(&self, transport: AudioTransport) -> Result<()> {
+        if self.active_audio_transport() == Some(transport) {
+            #[cfg(feature = "usb")]
+            if transport == AudioTransport::UsbVendorHid
+                && self
+                    .usb_hid_audio
+                    .lock()
+                    .unwrap()
+                    .as_ref()
+                    .is_some_and(UsbVendorAudioReader::is_running)
+            {
+                return Ok(());
+            }
+            #[cfg(feature = "ble")]
+            if transport == AudioTransport::BleGatt {
+                return Ok(());
+            }
+        }
+        // 先校验再动传输：校验失败就直接返回，调用方看到 Err 时现有音频原封不动。
+        // 反过来的话，"切到一条不支持的传输"会先把正在跑的那条拆掉再报错，
+        // 调用方以为什么都没发生，实际音频已经死了、固件那边的租约还活着。
+        let capabilities = self.audio_capabilities();
+        if !capabilities.supports(transport) {
+            return Err(anyhow::anyhow!("当前 capability 不支持 {:?}", transport));
+        }
+        let lease = *self.audio_stream_state.lock().unwrap();
+        if lease.and_then(|state| state.active_transport) != Some(transport) {
+            return Err(anyhow::anyhow!(
+                "必须先为 {:?} 成功建立固件 audio stream lease",
+                transport
+            ));
+        }
+        self.stop_local_audio_reader();
+        match transport {
+            AudioTransport::UsbVendorHid => {
+                #[cfg(feature = "usb")]
+                {
+                    if self.connection() != Some(ConnectionType::Usb) {
+                        return Err(anyhow::anyhow!("当前不是 USB 连接"));
+                    }
+                    let sink = self.build_audio_sink();
+                    let epoch = self.audio_connection_epoch.load(Ordering::SeqCst);
+                    let reader = UsbVendorAudioReader::start(sink, epoch).await?;
+                    *self.usb_hid_audio.lock().unwrap() = Some(reader);
+                }
+                #[cfg(not(feature = "usb"))]
+                return Err(anyhow::anyhow!("usb feature 未启用"));
+            }
+            AudioTransport::BleGatt => {
+                #[cfg(feature = "ble")]
+                {
+                    if self.connection() != Some(ConnectionType::Ble) {
+                        return Err(anyhow::anyhow!("当前不是 BLE 连接"));
+                    }
+                    let client = self
+                        .vendor_gatt_client
+                        .lock()
+                        .unwrap()
+                        .clone()
+                        .ok_or_else(|| anyhow::anyhow!("VendorGattClient 未就绪"))?;
+                    client.set_audio_enabled(true);
+                }
+                #[cfg(not(feature = "ble"))]
+                return Err(anyhow::anyhow!("ble feature 未启用"));
+            }
+            AudioTransport::UsbUac | AudioTransport::System => {
+                return Err(anyhow::anyhow!("此方法只启动 Board Vendor transport"));
+            }
+        }
+        *self.active_audio_transport.lock().unwrap() = Some(transport);
+        Ok(())
+    }
+
+    /// Negotiate capability + START lease + local reader as one rollback-safe operation.
+    pub async fn start_board_audio(
+        &self,
+        transport: AudioTransport,
+        scope: AudioStreamScope,
+        lease_id: u32,
+        ttl_ms: u16,
+    ) -> Result<AudioStreamState> {
+        let capabilities = self.query_audio_capabilities().await?;
+        if !capabilities.supports(transport) {
+            return Err(anyhow::anyhow!("当前 capability 不支持 {:?}", transport));
+        }
+        let state = self
+            .control_audio_stream(AudioStreamAction::Start, transport, scope, lease_id, ttl_ms)
+            .await?;
+        if let Err(error) = self.start_board_audio_reader(transport).await {
+            let _ = self
+                .control_audio_stream(AudioStreamAction::Stop, transport, scope, lease_id, ttl_ms)
+                .await;
+            return Err(error);
+        }
+        Ok(state)
+    }
+
+    /// Enable old BLE FE63 session-only delivery. It never creates a continuous lease and is
+    /// intentionally unavailable for USB or timeline scope.
+    pub fn start_legacy_ble_session_reader(&self) -> Result<()> {
+        if self.connection() != Some(ConnectionType::Ble) {
+            return Err(anyhow::anyhow!("旧 envelope 仅支持 BLE session"));
+        }
+        #[cfg(feature = "ble")]
+        {
+            self.stop_local_audio_reader();
+            let client = self
+                .vendor_gatt_client
+                .lock()
+                .unwrap()
+                .clone()
+                .ok_or_else(|| anyhow::anyhow!("VendorGattClient 未就绪"))?;
+            client.set_audio_enabled(true);
+            *self.active_audio_transport.lock().unwrap() = Some(AudioTransport::BleGatt);
+            Ok(())
+        }
+        #[cfg(not(feature = "ble"))]
+        Err(anyhow::anyhow!("ble feature 未启用"))
+    }
+
+    /// Explicit UAC compatibility opt-in. Merely connecting USB or installing a PcmSink never
+    /// calls this function and therefore never requests OS microphone access.
+    pub fn start_usb_uac_compat(&self) -> Result<()> {
+        #[cfg(feature = "usb")]
+        {
+            if self.connection() != Some(ConnectionType::Usb) {
+                return Err(anyhow::anyhow!("当前不是 USB 连接"));
+            }
+            if self.audio_stream_state.lock().unwrap().is_some() {
+                return Err(anyhow::anyhow!(
+                    "Board audio lease 仍活跃，必须先显式 STOP 后才能打开 UAC"
+                ));
+            }
+            self.stop_local_audio_reader();
+            let pcm = self
+                .pcm_sink
+                .lock()
+                .unwrap()
+                .clone()
+                .ok_or_else(|| anyhow::anyhow!("尚未设置 PcmSink"))?;
+            let capture = UsbAudioCapture::new(pcm);
+            capture.start()?;
+            *self.usb_capture.lock().unwrap() = Some(capture);
+            *self.active_audio_transport.lock().unwrap() = Some(AudioTransport::UsbUac);
+            Ok(())
+        }
+        #[cfg(not(feature = "usb"))]
+        Err(anyhow::anyhow!("usb feature 未启用"))
+    }
+
+    pub fn stop_local_audio_reader(&self) {
+        #[cfg(feature = "usb")]
+        {
+            if let Some(reader) = self.usb_hid_audio.lock().unwrap().take() {
+                reader.stop();
+            }
+            if let Some(capture) = self.usb_capture.lock().unwrap().take() {
+                capture.stop();
+            }
+        }
+        #[cfg(feature = "ble")]
+        if let Some(client) = self.vendor_gatt_client.lock().unwrap().clone() {
+            client.set_audio_enabled(false);
+        }
+        *self.active_audio_transport.lock().unwrap() = None;
+    }
+
     /// 查询 App 在线状态（CMD 0x66）。
     pub async fn get_app_online(&self) -> Result<bool> {
         self.app_online_query_command(HidPacket::get_app_online(), CMD_AI_GET_APP_ONLINE)
@@ -1224,16 +1509,20 @@ impl BoardDeviceCore {
             .ok_or_else(|| anyhow::anyhow!("无 BLE adapter"))
     }
 
-    /// 构造 BLE 音频 sink:优先 audio_frame_sink(原始 mSBC),否则 MsbcDecoderSink(pcm_sink),否则 CountingSink
-    #[cfg(feature = "ble")]
-    fn build_ble_audio_sink(&self) -> Arc<dyn AudioFrameSink> {
+    /// Construct the unified decoded-frame sink. Legacy PcmSink remains an adapter only.
+    fn build_audio_sink(&self) -> Arc<dyn AudioFrameSink> {
         if let Some(frame_sink) = self.audio_frame_sink.lock().unwrap().clone() {
             return frame_sink;
         }
         if let Some(pcm) = self.pcm_sink.lock().unwrap().clone() {
-            return Arc::new(MsbcDecoderSink::new(pcm));
+            return Arc::new(PcmAudioFrameAdapter::new(pcm));
         }
         Arc::new(CountingSink::new())
+    }
+
+    #[cfg(feature = "ble")]
+    fn build_ble_audio_sink(&self) -> Arc<dyn AudioFrameSink> {
+        self.build_audio_sink()
     }
 }
 

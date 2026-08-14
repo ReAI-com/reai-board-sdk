@@ -24,3 +24,5 @@ pub mod ble;
 
 #[cfg(feature = "usb")]
 pub mod usb_capture;
+#[cfg(feature = "usb")]
+pub mod usb_hid_audio;

@@ -1,14 +1,14 @@
 //! 热插拔/断线重连管理器(USB + BLE Vendor GATT)—— V2 tokio async。
 //!
 //! 四阶段循环:wait_for_device → connect → monitor → cleanup。
-//! - USB:hidapi Config/Consumer + cpal USB Audio,拔出立即 DeviceGone→自动重连
+//! - USB:hidapi Config/Consumer，拔出立即 DeviceGone→自动重连；不枚举系统音频端点
 //! - BLE:Vendor GATT(btleplug),扫描失败/连接失败保持 ble_auto_connect 重试,
 //!   GATT 断连(超范围/固件重启)也自动重连;只有手动断开/CMD=0x60 才停
 //!
 //! USB 优先于 BLE(USB 插入时抢占 BLE 会话)。
 //!
 //! **V2 变化**:`run()` 改 async;`thread::sleep` → `tokio::time::sleep`;
-//! 阻塞的 HID/cpal 枚举(`detect_hid_connection` / `connect_device_hid`)用
+//! 阻塞的 HID 枚举(`detect_hid_connection` / `connect_device_hid`)用
 //! `tokio::task::spawn_blocking` 包装;BLE client 调用 `.await`。
 //! 四阶段状态机骨架与 V1 一致(实战验证过,不重构为 select!,避免引入时序 bug)。
 
@@ -28,10 +28,8 @@ use crate::kernel::types::ConnectionType;
 
 #[cfg(feature = "usb")]
 use {
-    crate::kernel::types::is_usb_audio_device_name,
     crate::runtime::usb::device_manager::{DeviceConnection, DeviceManager},
     crate::runtime::usb::monitor::{HidMonitor, MonitorConfig},
-    cpal::traits::{DeviceTrait, HostTrait},
     hidapi::{BusType, HidApi},
 };
 
@@ -236,71 +234,6 @@ enum HidDetectionDecision {
     NotConnected,
 }
 
-/// 可用的音频输入设备名里,是否存在本设备的 USB Audio 接口。
-///
-/// 判定只认 [`is_usb_audio_device_name`] 的关键词表。历史上这里还跟了一条
-/// 「名字含 usb 就算」的兜底,它会把任意 USB 麦克风/声卡认成键盘——键盘不在
-/// 也会判定「USB 已连接」,随后 `connect_device_hid` 必然失败并陷入重连循环。
-/// 该兜底与关键词表自身的原则(不收录过于宽泛的词,见 `USB_AUDIO_KEYWORDS`
-/// 的注释)矛盾,是异步重写时从 V1 整段搬运的遗留,已移除。
-#[cfg(feature = "usb")]
-fn has_target_usb_audio<I>(device_names: I) -> bool
-where
-    I: IntoIterator,
-    I::Item: AsRef<str>,
-{
-    device_names
-        .into_iter()
-        .any(|name| is_usb_audio_device_name(name.as_ref()))
-}
-
-/// 当前是否存在本设备的 USB Audio 输入接口。
-///
-/// ## 先按名字筛,命中了才验证「是不是可用输入」
-///
-/// 判定条件与改动前**逐项一致**：名字匹配 且 支持输入 且 能拿到默认输入配置。
-/// 变的只是求值顺序 —— 先做便宜的名字匹配,只有名字命中才去做昂贵的那两步验证。
-///
-/// 为什么值得这么绕：`input_devices()` 会对机器上**每一个**设备调
-/// `supported_input_configs()`,进而 `AudioComponentInstanceNew` +
-/// `AudioDeviceCreateIOProcID` —— 也就是向系统音频服务注册 IO 回调、协商流用途。
-/// 实测(macOS 26.5,装有若干虚拟音频驱动的机器)这个调用会**无限期挂住**：
-/// 40 秒采样 100% 停在同一次调用上、线程 CPU 却接近 0。而本函数跑在全局唯一的
-/// HID 线程上,设备识别 / DFU 探测 / 按键配置读写 / 固件升级全排队走它 ——
-/// 一次挂死就是整条 USB 键盘通路静默失效。
-///
-/// 改成先筛名字之后,常态(没有同名设备)一次 AudioUnit 都不会创建;只有真出现
-/// 同名设备时才付那一次代价,而那正是「需要音频兜底」的场景本身。
-///
-/// **不能只看名字就返回 true**：[`USB_AUDIO_KEYWORDS`](crate::kernel::types) 里
-/// 含 `reai` / `vibe` 这类宽泛子串,只作输出的同名设备也会命中。少了输入验证会把
-/// 它误判成「USB 已连接」,随后 `connect_device_hid` 必然失败,退化成
-/// 「判定连上 → 连接失败 → 500ms 后重试」的死循环,还会一直挡住 BLE 那条路。
-#[cfg(feature = "usb")]
-fn probe_target_usb_audio() -> bool {
-    let devices = match cpal::default_host().devices() {
-        Ok(devices) => devices,
-        Err(e) => {
-            log::warn!(target: "hid", "cpal 无法枚举音频设备: {e}");
-            return false;
-        }
-    };
-
-    // 名字命中才付昂贵的那一步。单个名字也走 [`has_target_usb_audio`],
-    // 避免这里和批量判定各用一套匹配规则。
-    devices
-        .filter(|d| d.name().is_ok_and(|n| has_target_usb_audio([n])))
-        .any(|d| {
-            // 两项验证缺一不可,合起来才等于改动前 `input_devices()` 的筛选：
-            // 前者是 cpal `input_devices()` 内部的 supports_input,后者是原先显式
-            // 跟的那一道过滤。两者查的属性并不相同(supported 读 StreamConfiguration
-            // 与可用采样率,default 读当前 StreamFormat),少任何一项都不是等价改写。
-            d.supported_input_configs()
-                .is_ok_and(|mut configs| configs.next().is_some())
-                && d.default_input_config().is_ok()
-        })
-}
-
 /// 复用当前线程的 [`HidApi`] 实例执行 `f`,避免每次检测都重建整个 HID 上下文。
 ///
 /// ## 为什么是 thread_local 而不是全局单例
@@ -440,12 +373,8 @@ fn ble_preemption_from_hid(hid_says_preempt: Option<bool>) -> BlePreemptionCheck
 }
 
 #[cfg(feature = "usb")]
-fn decide_hid_detection(
-    has_usb_audio: bool,
-    has_usb_hid: bool,
-    has_unknown_hid: bool,
-) -> HidDetectionDecision {
-    if has_usb_audio || has_usb_hid {
+fn decide_hid_detection(has_usb_hid: bool, has_unknown_hid: bool) -> HidDetectionDecision {
+    if has_usb_hid {
         HidDetectionDecision::Connected
     } else if has_unknown_hid {
         HidDetectionDecision::ProbeMode
@@ -674,7 +603,7 @@ impl HotplugManager {
     // USB HID 检测(spawn_blocking 包装阻塞枚举)
     // ================================================================
 
-    /// 异步包装 `detect_hid_connection`(cpal + hidapi 阻塞枚举放带 CFRunLoop 的线程)
+    /// 异步包装 `detect_hid_connection`(hidapi 阻塞枚举放带 CFRunLoop 的线程)
     #[cfg(feature = "usb")]
     async fn detect_hid_connection_async() -> Option<ConnectionType> {
         spawn_blocking_with_runloop(Self::detect_hid_connection)
@@ -696,13 +625,8 @@ impl HotplugManager {
 
     /// 阻塞:BLE 会话期间判断 USB 是否插入,**只枚举 HID,跳过 cpal 音频枚举**。
     ///
-    /// 音频枚举(对每个输入设备调 `default_input_config()` 触发 CoreAudio 查询)是
-    /// 单次检测里最贵的一块。它的价值在于「首次连接时不必等 HID 枚举就绪」,而 BLE
-    /// 已经连上的场景没有这个紧迫性——此处只需回答「该不该切走」,晚几百毫秒无感。
-    ///
-    /// 但 HID 不可用时**不能**据此判定没插 USB:那正是音频信号唯一能救场的情形
-    /// (见 [`Self::detect_hid_connection`] 末尾的 `has_usb_audio` 分支)。这种情况
-    /// 返回 [`BlePreemptionCheck::NeedsFullCheck`],由调用方退回完整检测。
+    /// 全程不枚举 CoreAudio/WASAPI；HID 不可用时返回
+    /// [`BlePreemptionCheck::NeedsFullCheck`] 重试 HID 完整检测。
     #[cfg(feature = "usb")]
     fn check_usb_preemption() -> BlePreemptionCheck {
         let decision = with_reused_hid_api(|api| {
@@ -713,22 +637,14 @@ impl HotplugManager {
         ble_preemption_from_hid(decision)
     }
 
-    /// 阻塞:枚举 hidapi HID(必要时再看一眼音频设备名),判定 USB 是否可连。
-    /// USB Audio 与 HID 任一存在即认为 USB 可连;仅有 HID 时用 CMD 0x13 探测 mode==3。
-    ///
-    /// 音频那一路是**惰性**的:HID 已经认出设备时根本不去问 CoreAudio,理由见下方注释。
+    /// 阻塞:只枚举 hidapi HID 判定 USB 是否可连。Board-first detection must never
+    /// enumerate or open OS audio endpoints; an explicit UAC compatibility request owns that.
     #[cfg(feature = "usb")]
     fn detect_hid_connection() -> Option<ConnectionType> {
         let hid_decision = with_reused_hid_api(|api| {
             let (has_usb_hid, has_unknown_hid) = scan_target_hid_buses(api);
 
-            // HID 已经在 USB 总线上认出设备时,音频信号改变不了结论 ——
-            // [`decide_hid_detection`] 里 `has_usb_audio || has_usb_hid` 已经短路成
-            // Connected。所以键盘连着的时候完全不必碰 CoreAudio,而那正是用户日常
-            // 所处的状态、这条检测每 500 毫秒就跑一次。
-            let has_usb_audio = !has_usb_hid && probe_target_usb_audio();
-
-            match decide_hid_detection(has_usb_audio, has_usb_hid, has_unknown_hid) {
+            match decide_hid_detection(has_usb_hid, has_unknown_hid) {
                 HidDetectionDecision::Connected => Some(ConnectionType::Usb),
                 HidDetectionDecision::ProbeMode => match Self::probe_device_mode(api) {
                     Some(3) => Some(ConnectionType::Usb),
@@ -738,22 +654,7 @@ impl HotplugManager {
             }
         });
 
-        if let Some(decision) = hid_decision {
-            decision
-        // HidApi 整个不可用时闭包压根没跑过,音频是这里唯一还能看见设备的信号,
-        // 所以这一路必须真去探一次(每次调用至多探一次,两条分支互斥)。
-        } else if probe_target_usb_audio() {
-            // HidApi::new 失败(权限/驱动问题)但 cpal 看到了 USB Audio。
-            // 返回 Usb 会让后续 connect_device_hid 失败,进入重连循环 ——
-            // 这里至少留 warn 让用户能在日志看到根因。
-            log::warn!(
-                target: "hid",
-                "HidApi::new 失败但有 USB Audio,USB HID 命令路径将不可用(后续连接可能失败循环)"
-            );
-            Some(ConnectionType::Usb)
-        } else {
-            None
-        }
+        hid_decision.flatten()
     }
 
     // ================================================================
@@ -967,7 +868,7 @@ impl HotplugManager {
         let vendor_running = client.running();
         #[cfg(feature = "usb")]
         let mut usb_detected = false;
-        // 轻量检测跳过 cpal 音频枚举,但每隔约 FULL_CHECK_PERIOD 仍跑一次完整检测兜底,
+        // 轻量检测只扫 HID bus，每隔约 FULL_CHECK_PERIOD 跑一次完整 HID 检测兜底，
         // 防御轻量路径未覆盖的退化场景。按 driver 的 500ms 周期算是每 10 次一回,
         // 九成检测省掉了音频枚举;SDK 默认的 5s 周期则退化成每次都完整检测(N=1)。
         #[cfg(feature = "usb")]
@@ -1167,31 +1068,23 @@ mod tests {
     #[test]
     fn explicit_usb_hid_connects_without_waiting_for_audio() {
         assert_eq!(
-            decide_hid_detection(false, true, false),
+            decide_hid_detection(true, false),
             HidDetectionDecision::Connected
         );
     }
 
-    /// 锁住 [`HotplugManager::detect_hid_connection`] 惰性跳过音频探测的前提。
-    ///
-    /// 那里在 `has_usb_hid` 为真时直接传 `false` 当音频信号、不去枚举 CoreAudio。
-    /// 这一步只有在「HID 已认出设备时音频改变不了结论」成立时才等价。若日后有人
-    /// 让音频参与这两种组合的判定,本测试会先失败,提醒同步撤掉那个跳过。
     #[test]
-    fn audio_signal_cannot_change_verdict_once_usb_hid_is_seen() {
-        for has_unknown_hid in [false, true] {
-            assert_eq!(
-                decide_hid_detection(false, true, has_unknown_hid),
-                decide_hid_detection(true, true, has_unknown_hid),
-                "has_usb_hid 为真时音频信号不应影响判定(has_unknown_hid={has_unknown_hid})"
-            );
-        }
+    fn usb_detection_requires_hid_and_never_uses_audio_endpoint_signal() {
+        assert_eq!(
+            decide_hid_detection(false, false),
+            HidDetectionDecision::NotConnected
+        );
     }
 
     #[test]
     fn unknown_hid_bus_keeps_command_probe_fallback() {
         assert_eq!(
-            decide_hid_detection(false, false, true),
+            decide_hid_detection(false, true),
             HidDetectionDecision::ProbeMode
         );
     }
@@ -1199,50 +1092,17 @@ mod tests {
     #[test]
     fn bluetooth_only_target_is_not_misclassified_as_usb() {
         assert_eq!(
-            decide_hid_detection(false, false, false),
+            decide_hid_detection(false, false),
             HidDetectionDecision::NotConnected
         );
     }
 
     #[test]
-    fn usb_audio_remains_sufficient_during_hid_enumeration_delay() {
+    fn usb_hid_is_sufficient_without_any_audio_enumeration() {
         assert_eq!(
-            decide_hid_detection(true, false, false),
+            decide_hid_detection(true, false),
             HidDetectionDecision::Connected
         );
-    }
-
-    // ===== 音频设备名筛选:不能被任意 USB 音频设备冒名顶替 =====
-
-    #[test]
-    fn unrelated_usb_audio_devices_do_not_count_as_the_keyboard() {
-        // 这些名字都含 "usb",曾经会让键盘不在也判定「USB 已连接」。
-        assert!(!has_target_usb_audio(["USB Microphone"]));
-        assert!(!has_target_usb_audio(["Generic USB Audio"]));
-        assert!(!has_target_usb_audio([
-            "Blue Yeti USB",
-            "USB Audio CODEC",
-            "Scarlett Solo USB"
-        ]));
-    }
-
-    #[test]
-    fn keyword_matched_devices_still_count() {
-        assert!(has_target_usb_audio(["ReAI Audio-HID"]));
-        assert!(has_target_usb_audio(["Audio-HID"]));
-        assert!(has_target_usb_audio(["AI Vibe Board"]));
-        // 混在无关设备里也要认出来
-        assert!(has_target_usb_audio([
-            "MacBook Pro Microphone",
-            "USB Microphone",
-            "ReAI Vibe Board"
-        ]));
-    }
-
-    #[test]
-    fn no_audio_devices_means_no_match() {
-        assert!(!has_target_usb_audio(Vec::<String>::new()));
-        assert!(!has_target_usb_audio(["MacBook Pro Microphone"]));
     }
 
     // ===== BLE 抢占判定:比完整路径更敏感 =====
@@ -1252,7 +1112,7 @@ mod tests {
         // 完整路径对 Unknown 走 ProbeMode 再发命令探测,抢占路径直接算数。
         assert!(decide_ble_preemption(false, true));
         assert_eq!(
-            decide_hid_detection(false, false, true),
+            decide_hid_detection(false, true),
             HidDetectionDecision::ProbeMode
         );
     }
