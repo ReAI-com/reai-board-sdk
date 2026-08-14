@@ -11,7 +11,7 @@
 
 [产品官网](https://b.reai.com) | [English README](README.md) | [API 文档 (docs.rs)](https://docs.rs/reai-board-sdk) | [更新日志](CHANGELOG.md)
 
-![ReAI-Vibe-Board](assets/board-unibody.webp)
+[![ReAI-Vibe-Board](assets/board-unibody.webp)](https://b.reai.com)
 
 ---
 
@@ -32,7 +32,7 @@ CNC 铝合金一体机身，带金属旋钮和三段式模式拨杆。SDK 实际
 
 | | | |
 |:-:|:-:|:-:|
-| ![金属旋钮](assets/board-knob.webp) | ![双麦阵列](assets/board-mic.webp) | ![段落感按键](assets/board-keys.webp) |
+| [![金属旋钮](assets/board-knob.webp)](https://b.reai.com) | [![双麦阵列](assets/board-mic.webp)](https://b.reai.com) | [![段落感按键](assets/board-keys.webp)](https://b.reai.com) |
 | 金属旋钮 | 双麦阵列 | 段落感按键 |
 
 ---

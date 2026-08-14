@@ -12,7 +12,7 @@ coding workflows.
 
 [Product site](https://b.reai.com) | [中文文档](README.zh-CN.md) | [API docs (docs.rs)](https://docs.rs/reai-board-sdk) | [Changelog](CHANGELOG.md)
 
-![ReAI-Vibe-Board](assets/board-unibody.webp)
+[![ReAI-Vibe-Board](assets/board-unibody.webp)](https://b.reai.com)
 
 ---
 
@@ -34,7 +34,7 @@ three for the knob, six for the keys, three for the lever.
 
 | | | |
 |:-:|:-:|:-:|
-| ![Knob](assets/board-knob.webp) | ![Dual mic](assets/board-mic.webp) | ![Keys](assets/board-keys.webp) |
+| [![Knob](assets/board-knob.webp)](https://b.reai.com) | [![Dual mic](assets/board-mic.webp)](https://b.reai.com) | [![Keys](assets/board-keys.webp)](https://b.reai.com) |
 | Metal knob | Dual-mic array | Tactile keys |
 
 ---
