@@ -102,6 +102,9 @@ impl UsbVendorAudioReader {
                             ready.notify_one();
                         }
                         Ok(0) => thread::yield_now(),
+                        // 按键事件等别的报告也走这条共用接口，长度本来就不是 64。
+                        // 它们不是短掉的音频包，报警只会把排障的人往错方向带。
+                        Ok(_) if matches!(report[0], REPORT_ID_INPUT | REPORT_ID_KEY_EVENT) => {}
                         Ok(length) => {
                             short_reads = short_reads.saturating_add(1);
                             if short_reads <= 3 || short_reads.is_multiple_of(100) {
