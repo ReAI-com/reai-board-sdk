@@ -1407,9 +1407,31 @@ impl BoardDeviceCore {
                 .ok_or_else(|| anyhow::anyhow!("未找到 Config 接口"))?;
             let device = api.open_path(dev_info.path())?;
             device.write(&cmd)?;
+            // Config(0xFFA0) 与 Audio(0xFFAA) 是同一个物理 HID 接口上的两个顶层集合，
+            // macOS 按 path 打开拿到的是整条接口——板载音频一开，命令响应就淹没在
+            // 每秒上百个 0xB1 音频包里。只读一个报告会把音频包当成响应，表现是
+            // "响应无效"，而且录音期间任何命令都会偶发中招。按报告类型筛出真正的响应。
+            let deadline = std::time::Instant::now() + Duration::from_millis(3000);
             let mut buf = [0u8; 64];
-            let len = device.read_timeout(&mut buf, 3000)?;
-            Ok((len, buf))
+            let mut fallback: Option<(usize, [u8; 64])> = None;
+            loop {
+                let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+                if remaining.is_zero() {
+                    // 超时前没等到对得上的响应：把最后一个命令响应交回去，
+                    // 让上层解析器给出比"读超时"更具体的错误。
+                    return fallback.ok_or_else(|| anyhow::anyhow!("HID 命令响应读取超时"));
+                }
+                let len = device.read_timeout(&mut buf, remaining.as_millis() as i32)?;
+                if len == 0 {
+                    continue;
+                }
+                match classify_command_report(&buf[..len], cmd[1]) {
+                    CommandReportKind::Match => return Ok((len, buf)),
+                    // 是命令响应，但不是这条命令的（异步上报等）：留作超时兜底。
+                    CommandReportKind::OtherCommand => fallback = Some((len, buf)),
+                    CommandReportKind::NotCommand => {}
+                }
+            }
         });
         let res = result
             .await

@@ -993,6 +993,33 @@ fn parse_audio_stream_payload(
     })
 }
 
+/// 读到的 HID 报告相对于"我刚发出的那条命令"是什么。
+///
+/// Config(0xFFA0) 与 Audio(0xFFAA) 是同一条物理 HID 接口上的两个顶层集合，
+/// macOS 按 path 打开拿到的是整条接口。板载音频一开，命令响应就淹没在每秒
+/// 上百个音频包里——不筛就会把音频包当成响应，而且录音期间任何命令都会中招。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CommandReportKind {
+    /// 正是这条命令的响应。
+    Match,
+    /// 是命令响应，但不是这条命令的（异步上报等）。
+    OtherCommand,
+    /// 根本不是命令响应（音频包、按键事件等）。
+    NotCommand,
+}
+
+/// 按报告类型给读到的报告归类。`expected_cmd` 是刚发出的那条命令的 CMD 字节。
+pub fn classify_command_report(report: &[u8], expected_cmd: u8) -> CommandReportKind {
+    if report.len() < 2 || report[0] != REPORT_ID_INPUT {
+        return CommandReportKind::NotCommand;
+    }
+    if report[1] == expected_cmd {
+        CommandReportKind::Match
+    } else {
+        CommandReportKind::OtherCommand
+    }
+}
+
 pub fn parse_usb_audio_report(
     report: &[u8],
 ) -> Option<crate::kernel::audio::EncodedAudioPacket<'_>> {
@@ -1269,6 +1296,63 @@ pub fn key_index_to_mode(key_index: usize) -> Option<(u8, &'static str)> {
         10 => Some((2, "PLAN")),
         11 => Some((0, "CHAT")),
         _ => None,
+    }
+}
+
+#[cfg(test)]
+mod command_report_classification {
+    use super::*;
+
+    fn report(first: u8, second: u8) -> [u8; PACKET_SIZE] {
+        let mut r = [0u8; PACKET_SIZE];
+        r[0] = first;
+        r[1] = second;
+        r
+    }
+
+    #[test]
+    fn audio_packets_are_never_mistaken_for_a_command_response() {
+        // 这正是「录音期间发命令会拿到音频包」那个 bug 的核心。
+        let audio = report(REPORT_ID_AUDIO, AUDIO_ENVELOPE_VERSION);
+        assert_eq!(
+            classify_command_report(&audio, CMD_AI_AUDIO_STREAM_CONTROL),
+            CommandReportKind::NotCommand
+        );
+    }
+
+    #[test]
+    fn key_events_are_not_command_responses_either() {
+        let key = report(REPORT_ID_KEY_EVENT, 0x01);
+        assert_eq!(
+            classify_command_report(&key, CMD_STATUS),
+            CommandReportKind::NotCommand
+        );
+    }
+
+    #[test]
+    fn the_response_to_the_command_we_sent_is_a_match() {
+        let ack = report(REPORT_ID_INPUT, CMD_AI_AUDIO_STREAM_CONTROL);
+        assert_eq!(
+            classify_command_report(&ack, CMD_AI_AUDIO_STREAM_CONTROL),
+            CommandReportKind::Match
+        );
+    }
+
+    #[test]
+    fn another_commands_response_is_kept_apart_from_ours() {
+        let other = report(REPORT_ID_INPUT, CMD_STATUS);
+        assert_eq!(
+            classify_command_report(&other, CMD_AI_AUDIO_STREAM_CONTROL),
+            CommandReportKind::OtherCommand
+        );
+    }
+
+    #[test]
+    fn a_truncated_report_is_not_a_command_response() {
+        assert_eq!(
+            classify_command_report(&[REPORT_ID_INPUT], CMD_STATUS),
+            CommandReportKind::NotCommand
+        );
     }
 }
 

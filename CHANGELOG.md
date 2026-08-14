@@ -74,6 +74,13 @@ follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Fixed
 
+- Commands issued while board audio is streaming no longer read an audio packet
+  instead of their response. The config and audio collections share one physical
+  HID interface, so opening either one delivers every report on that interface;
+  reading a single report after a write picked up a `0xB1` audio packet as soon
+  as the stream was running. Stopping a session reported an invalid response and
+  left the lease to expire on its own, and any command sent mid-recording could
+  fail the same way.
 - A device-announced discontinuity now resets the sequence tracker. Without it, a
   firmware-side encoder restart inside a live lease left every following packet
   looking out-of-order, so audio went silent — potentially for tens of thousands
