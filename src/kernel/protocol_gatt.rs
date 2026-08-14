@@ -29,6 +29,33 @@ pub const VENDOR_DEVICE_PREFIX: &str = "REAI_VB_";
 pub const AUDIO_FLAG_SILENCE: u8 = 0;
 pub const AUDIO_FLAG_DATA: u8 = 1;
 
+pub fn parse_audio_packet_v1(data: &[u8]) -> Option<crate::kernel::audio::EncodedAudioPacket<'_>> {
+    use crate::kernel::protocol_hid::{
+        AUDIO_ENVELOPE_VERSION, AUDIO_FLAG_DATA as V1_DATA, AUDIO_FLAG_DISCONTINUITY,
+        MSBC_FRAME_SIZE,
+    };
+    if data.len() < 5
+        || data[0] != AUDIO_ENVELOPE_VERSION
+        || data[1] & V1_DATA == 0
+        || data[1] & !(V1_DATA | AUDIO_FLAG_DISCONTINUITY) != 0
+    {
+        return None;
+    }
+    let payload_len = data[4] as usize;
+    if payload_len == 0
+        || !payload_len.is_multiple_of(MSBC_FRAME_SIZE)
+        || data.len() != 5 + payload_len
+    {
+        return None;
+    }
+    Some(crate::kernel::audio::EncodedAudioPacket {
+        payload: &data[5..5 + payload_len],
+        transport: crate::kernel::audio::AudioTransport::BleGatt,
+        sequence: Some(u16::from_le_bytes([data[2], data[3]])),
+        device_discontinuity: data[1] & AUDIO_FLAG_DISCONTINUITY != 0,
+    })
+}
+
 // ============ 包解析 ============
 
 /// 解析命令/事件包：`[CMD][LEN][DATA...]`

@@ -26,7 +26,7 @@ What the SDK can actually observe:
 | Knob (rotate + press) | `KeyPressEvent` — KEY0 / KEY1 encoder phases, KEY2 press |
 | 6 physical keys | `KeyPressEvent` KEY3–KEY8; KEY6 is the AI-voice key and also emits `AiVoiceKeyEvent` |
 | Three-way mode lever | KEY9 / KEY10 / KEY11 → `ModeChangeEvent` (YOLO / PLAN / CHAT) |
-| Microphone | `PcmSink` delivers 16 kHz mono f32 — USB Audio captured directly, BLE mSBC decoded first |
+| Microphone | `PcmSink` delivers 16 kHz mono f32 — mSBC over vendor USB HID or BLE, decoded in-Rust (optional feature) |
 | USB-C / Bluetooth | Both transports, switched automatically |
 
 The twelve `key_index` slots above cover every input the firmware reports:
@@ -46,8 +46,9 @@ three for the knob, six for the keys, three for the lever.
 - **Auto hotplug + reconnect** — plug in USB, it takes over BLE; pull USB, BLE
   resumes. No glue code to write.
 - **16 kHz mono f32 PCM** delivered through a single `PcmSink::on_pcm` trait —
-  USB Audio is captured directly, BLE mSBC frames are decoded in-Rust (no
-  ffmpeg dependency).
+  the board streams mSBC over vendor USB HID or BLE and the SDK decodes it
+  in-Rust (no ffmpeg dependency), without opening an OS audio device. Entirely
+  optional: skip it and the system microphone still works as it always did.
 - **Typed device commands** — read/write key config, device info, bindings
   blob, silent-record flag, sleep timeout, work mode, factory physical-key
   test (firmware v1.58+), plus a vendor USB-HID DFU path for OTA upgrade
@@ -137,8 +138,11 @@ device and sends it commands. That has two consequences:
 - **No Accessibility / Input Monitoring required** in principle. The board's keys
   flow over vendor HID `0xFFA0` / consumer `0x000C`, not standard keyboard
   Usage `0x0007`. macOS may still prompt — authorize if it does.
-- **No microphone permission** is required; USB Audio capture here is device→host
-  only (no host mic).
+- **No microphone permission** on the board-audio path. From firmware v1.59 the
+  board's own mic arrives over vendor USB HID / BLE GATT as ordinary device data,
+  so the SDK does not enumerate or open a CoreAudio / WASAPI input device.
+  `start_usb_uac_compat()` is the one route that goes through the OS audio stack
+  and therefore the one route that can raise the microphone prompt.
 
 **macOS Bluetooth does prompt.** Creating the CoreBluetooth adapter triggers
 the system authorization dialog, so the SDK defers adapter creation until BLE
@@ -155,9 +159,13 @@ device state. See [Security notes](#security-notes).
 
 | Feature            | What it pulls in                                         | Default? |
 |--------------------|----------------------------------------------------------|----------|
-| `usb`              | `hidapi 2.6` (USB HID) + `cpal 0.15` (USB Audio capture) | ✅       |
-| `ble`              | `btleplug 0.12` (BLE GATT) + `futures-util`              | ✅       |
+| `usb`              | `hidapi 2.6` (USB HID) + `cpal 0.15` (USB Audio capture) + `msbc-decoder` | ✅       |
+| `ble`              | `btleplug 0.12` (BLE GATT) + `futures-util` + `msbc-decoder` | ✅       |
 | `test-mode`        | Factory test commands (e.g. `shutdown_device(0x5E)`)     | ❌       |
+
+Board audio is mSBC on every transport, so both transport features pull in the
+`msbc-decoder` crate — see [License](#license). `default-features = false`
+gives you the protocol layer alone.
 
 `BoardDeviceBlocking` needs no feature flag — it ships with `usb` or `ble`.
 
@@ -242,25 +250,66 @@ WebSocket bridge or another process.
 
 ---
 
-## Audio sinks
+## Audio
+
+Board audio is **optional**. Ignore this whole section and you still get key
+events, the mode lever, the knob and every device command — plus the ordinary
+system microphone, or whatever third-party dictation tool your users already
+run. Nothing else in the SDK depends on it.
+
+### Sinks
 
 ```rust
 pub trait PcmSink: Send + Sync {
-    fn on_pcm(&self, samples: &[f32]);     // 16 kHz mono f32 — unified across USB and BLE
+    fn on_pcm(&self, samples: &[f32]);                // 16 kHz mono f32
 }
 
 pub trait AudioFrameSink: Send + Sync {
-    fn on_msbc_frame(&self, frame: &[u8]); // raw 57-byte mSBC frames (BLE only, before decoding)
+    fn on_audio_frame(&self, frame: AudioFrame<'_>);  // same PCM + transport & continuity metadata
 }
 ```
 
-- USB Audio is captured directly via cpal and forwarded to `PcmSink`.
-- BLE mSBC frames are decoded to f32 by the built-in `MsbcDecoderSink` and
-  forwarded to the **same** `PcmSink` you registered.
+`AudioFrame` carries the decoded samples together with the transport they
+arrived on, a connection epoch, the on-wire packet sequence and three
+independent loss signals (`device_discontinuity`, `sequence_gap_frames`,
+`local_drop_frames`). `frame.discontinuity()` is true when any of them fired —
+use it to reset your own VAD / decoder state instead of guessing from timing.
 
-Built-in sinks: `MsbcDecoderSink` (mSBC → f32), `CountingSink` (frame / byte
-statistics). `set_pcm_sink()` accepts `Arc<dyn PcmSink>`; call it before
-`start().await`.
+`CountingSink` is a built-in `PcmSink` / `AudioFrameSink` for frame and byte
+statistics. `EncodedAudioDecoderSink` is the decoder the SDK puts in front of
+your sink — it turns versioned mSBC packets into `AudioFrame`s, it does not
+implement the sink traits itself. `set_pcm_sink()` accepts `Arc<dyn PcmSink>`;
+call it before `start().await`.
+
+### Where the audio comes from
+
+From firmware v1.59 the board streams its own mic over the **vendor transports**
+— USB Vendor HID or BLE GATT — as ordinary device data. No OS audio device is
+opened, so no microphone permission is involved:
+
+```rust
+use reai_board_sdk::kernel::audio::resolve_audio_transport;
+use reai_board_sdk::{AudioRouteRequest, AudioStreamScope};
+
+let caps = device.query_audio_capabilities().await?;          // 0x6E feature bits
+let transport = resolve_audio_transport(
+    AudioRouteRequest::BoardFirst,
+    device.connection(),
+    &caps,
+).ok_or_else(|| anyhow::anyhow!("no vendor audio transport on this firmware"))?;
+
+device.start_board_audio(transport, AudioStreamScope::Session, lease_id, ttl_ms).await?;
+```
+
+- `AudioRouteRequest::BoardFirst` resolves strictly against the capability bits
+  the device reported. If neither vendor transport is available it fails loudly —
+  it never silently falls back to a host microphone.
+- Capabilities are read as **feature bits**, not as "firmware is new enough".
+- `start_board_audio()` takes a lease (`Session` or `Timeline`) with a TTL;
+  `control_audio_stream()` renews it with `AudioStreamAction::Heartbeat`.
+- `start_usb_uac_compat()` is the compatibility route for older firmware. It
+  goes through the OS audio stack, so it is explicit, opt-in, and the only route
+  that can raise the microphone prompt.
 
 ---
 
@@ -414,12 +463,15 @@ It lives in its own crate precisely so the boundary is explicit:
 
 | Your build | mSBC decoder compiled in? | Effective licence |
 |------------|---------------------------|-------------------|
-| `default-features = false` (protocol only) | no | MIT |
-| `features = ["usb"]` — USB HID + USB Audio | no | MIT |
+| `default-features = false` (protocol only — keys, commands, DFU) | no | MIT |
+| `features = ["usb"]` — USB HID + board audio | **yes** | MIT + LGPL-2.1-or-later |
 | `features = ["ble"]` or default | **yes** | MIT + LGPL-2.1-or-later |
 
-If you only talk to the board over USB, no LGPL code reaches your binary. If
-you need BLE audio and LGPL is a problem for your product, talk to your legal
-team, or supply your own mSBC decoder through the `AudioFrameSink` trait —
-`set_audio_frame_sink()` hands you the raw 57-byte frames before any decoding
-happens.
+The board sends its mic as mSBC on **every** transport, so both `usb` and `ble`
+pull the decoder in. The LGPL-free build is the protocol layer on its own.
+
+That is a smaller trade-off than it looks, because **board audio is an optional
+feature, not a dependency**. Turn it off and the keyboard still does everything
+else: key mapping, the mode lever, the knob, device configuration, DFU. Your
+users keep their system microphone and can pair the board with any dictation
+tool they already use — including alongside your product. Nothing breaks.

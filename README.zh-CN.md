@@ -24,7 +24,7 @@ CNC 铝合金一体机身，带金属旋钮和三段式模式拨杆。SDK 实际
 | 旋钮（旋转 + 按下） | `KeyPressEvent` —— KEY0 / KEY1 编码器相位，KEY2 按压 |
 | 6 个实体按键 | `KeyPressEvent` KEY3~KEY8；KEY6 是 AI 语音键，另有独立的 `AiVoiceKeyEvent` |
 | 三段模式拨杆 | KEY9 / KEY10 / KEY11 → `ModeChangeEvent`（YOLO / PLAN / CHAT） |
-| 麦克风 | `PcmSink` 投递 16 kHz mono f32 —— USB Audio 直采，BLE 走 mSBC 解码 |
+| 麦克风 | `PcmSink` 投递 16 kHz mono f32 —— 板载 mSBC 走 USB 厂商 HID 或 BLE，Rust 内解码（可选功能） |
 | USB-C / 蓝牙 | 两种通道，自动切换 |
 
 上面 12 个 `key_index` 槽位覆盖了固件会上报的全部输入：旋钮占 3 个、
@@ -122,7 +122,9 @@ SDK **不模拟、不注入键盘输入**，它只读设备上报并向设备发
 - **不需要辅助功能 / 输入监控**：本设备按键走 vendor HID `0xFFA0` / consumer
   `0x000C`，不走 macOS 受保护的标准键盘 Usage `0x0007`。系统偶尔仍会提示，
   授权即可。
-- **不需要麦克风权限**：USB Audio 是设备→主机单向采集，不读主机麦克风。
+- **板载音频这条路不需要麦克风权限**：固件 v1.59 起，键盘自己的麦克风走厂商
+  USB HID / BLE GATT，以普通设备数据的形式传过来，SDK 不会枚举或打开系统录音
+  设备。只有 `start_usb_uac_compat()` 走系统音频栈，也只有它会触发麦克风授权弹窗。
 
 **macOS 蓝牙会弹权限框**：创建 CoreBluetooth adapter 会触发系统授权弹窗，
 所以 SDK 把 adapter 的创建推迟到真正要用 BLE 的时候 —— 弹窗出现在首次
@@ -138,9 +140,12 @@ SDK **不模拟、不注入键盘输入**，它只读设备上报并向设备发
 
 | Feature            | 引入依赖                                              | 默认？ |
 |--------------------|-------------------------------------------------------|--------|
-| `usb`              | `hidapi 2.6`（USB HID）+ `cpal 0.15`（USB Audio 采集）| ✅     |
-| `ble`              | `btleplug 0.12`（BLE GATT）+ `futures-util`           | ✅     |
+| `usb`              | `hidapi 2.6`（USB HID）+ `cpal 0.15`（USB Audio 采集）+ `msbc-decoder` | ✅     |
+| `ble`              | `btleplug 0.12`（BLE GATT）+ `futures-util` + `msbc-decoder` | ✅     |
 | `test-mode`        | 工厂测试命令（如 `shutdown_device(0x5E)`）            | ❌     |
+
+板载音频在每条传输上都是 mSBC，所以两个传输 feature 都会引入 `msbc-decoder`
+（见「协议」一节）。`default-features = false` 只给你协议层。
 
 `BoardDeviceBlocking` 不需要额外 feature —— 开了 `usb` 或 `ble` 就自带。
 
@@ -222,23 +227,60 @@ WebSocket 或跨进程转发时直接序列化成 JSON 信封即可。
 
 ---
 
-## 音频 sink
+## 音频
+
+板载音频是**可选的**。整节跳过也不影响按键事件、拨杆、旋钮和全部设备命令；用户
+照样有系统麦克风，也可以继续用他们本来就在用的第三方语音输入法。SDK 的其他部分
+不依赖它。
+
+### Sink
 
 ```rust
 pub trait PcmSink: Send + Sync {
-    fn on_pcm(&self, samples: &[f32]);     // 16 kHz mono f32 —— USB 与 BLE 统一
+    fn on_pcm(&self, samples: &[f32]);                // 16 kHz mono f32
 }
 
 pub trait AudioFrameSink: Send + Sync {
-    fn on_msbc_frame(&self, frame: &[u8]); // 原始 57 字节 mSBC 帧（仅 BLE，解码前）
+    fn on_audio_frame(&self, frame: AudioFrame<'_>);  // 同样的 PCM，外加传输与连续性信息
 }
 ```
 
-- USB Audio 经 cpal 直接采集送 `PcmSink`。
-- BLE mSBC 帧经内置 `MsbcDecoderSink` 解码后送**同一个** `PcmSink`。
+`AudioFrame` 除了解码后的样本，还带着它从哪条传输来、连接世代、线上包序号，以及
+三个互相独立的丢失信号（`device_discontinuity`、`sequence_gap_frames`、
+`local_drop_frames`）。任一命中时 `frame.discontinuity()` 为真 —— 用它来重置你自己
+的 VAD / 解码状态，别靠时间间隔去猜。
 
-内置 sink：`MsbcDecoderSink`（mSBC → f32）、`CountingSink`（帧/字节统计）。
-`set_pcm_sink()` 接 `Arc<dyn PcmSink>`，**必须在 `start().await` 前调用**。
+`CountingSink` 是内置的 `PcmSink` / `AudioFrameSink`，做帧数与字节统计。
+`EncodedAudioDecoderSink` 是 SDK 挡在你的 sink 前面的解码器 —— 它把带版本的
+mSBC 包变成 `AudioFrame`，本身并不实现 sink trait。`set_pcm_sink()` 接
+`Arc<dyn PcmSink>`，**必须在 `start().await` 前调用**。
+
+### 声音是从哪来的
+
+固件 v1.59 起，键盘把自己的麦克风数据当作普通设备数据，走**厂商传输**（USB
+Vendor HID 或 BLE GATT）发上来。全程不打开系统录音设备，因此不涉及麦克风权限：
+
+```rust
+use reai_board_sdk::kernel::audio::resolve_audio_transport;
+use reai_board_sdk::{AudioRouteRequest, AudioStreamScope};
+
+let caps = device.query_audio_capabilities().await?;          // 0x6E 能力位
+let transport = resolve_audio_transport(
+    AudioRouteRequest::BoardFirst,
+    device.connection(),
+    &caps,
+).ok_or_else(|| anyhow::anyhow!("该固件没有可用的厂商音频传输"))?;
+
+device.start_board_audio(transport, AudioStreamScope::Session, lease_id, ttl_ms).await?;
+```
+
+- `AudioRouteRequest::BoardFirst` 严格按设备上报的能力位解析。两条厂商传输都不
+  可用时它会明确失败，**绝不悄悄退回主机麦克风**。
+- 能力按**特性位**判定，不按「固件够不够新」判定。
+- `start_board_audio()` 拿的是带 TTL 的租约（`Session` 或 `Timeline`），
+  用 `control_audio_stream()` 配 `AudioStreamAction::Heartbeat` 续租。
+- `start_usb_uac_compat()` 是给旧固件的兼容路径。它走系统音频栈，所以必须显式
+  调用，也只有它会触发麦克风授权弹窗。
 
 ---
 
@@ -383,10 +425,14 @@ bit-exact 翻译，属于衍生作品，因此沿用 FFmpeg 的协议按
 
 | 你的构建 | 是否编入 mSBC 解码器 | 实际生效的协议 |
 |----------|---------------------|----------------|
-| `default-features = false`（只要协议层） | 否 | MIT |
-| `features = ["usb"]` —— USB HID + USB Audio | 否 | MIT |
+| `default-features = false`（只要协议层：按键、命令、升级） | 否 | MIT |
+| `features = ["usb"]` —— USB HID + 板载音频 | **是** | MIT + LGPL-2.1-or-later |
 | `features = ["ble"]` 或默认 | **是** | MIT + LGPL-2.1-or-later |
 
-只走 USB 的话，**不会有任何 LGPL 代码进入你的二进制**。如果你需要 BLE 音频
-而 LGPL 对你的产品是个问题：要么找法务确认，要么通过 `AudioFrameSink` 自带
-解码器 —— `set_audio_frame_sink()` 拿到的是解码前的原始 57 字节帧。
+键盘的麦克风在**每条传输**上都是 mSBC，所以 `usb` 和 `ble` 都会引入这个解码器。
+真正不含 LGPL 的构建是只要协议层那一种。
+
+这个取舍比看上去小，因为**板载音频是可选功能，不是依赖**。关掉它，键盘的其他
+能力一样不少：按键映射、拨杆、旋钮、设备配置、固件升级。用户的系统麦克风照常
+可用，也可以继续搭配他们已经在用的任何语音输入法 —— 哪怕和你的产品同时用。
+什么都不会坏。

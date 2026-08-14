@@ -25,14 +25,19 @@ all-features = true
 [features]
 # Default: end-user transports only. Factory commands require explicit opt-in.
 default = ["usb", "ble"]
-# USB HID + cpal USB Audio capture
-usb = ["dep:hidapi", "dep:cpal"]
+# USB HID + cpal USB Audio capture + board audio over vendor HID.
+#
+# NOTE ON LICENSING: board audio arrives as mSBC frames on every transport, so
+# this feature pulls in `msbc-decoder` (LGPL-2.1-or-later) exactly like `ble`
+# does. Build with `default-features = false` for the protocol layer alone and
+# no LGPL code is compiled into your binary.
+usb = ["dep:hidapi", "dep:cpal", "dep:msbc-decoder"]
 # BLE Vendor GATT (btleplug native async) + mSBC decoding.
 #
 # NOTE ON LICENSING: this feature pulls in `msbc-decoder`, which is
 # LGPL-2.1-or-later (it is a bit-exact translation of FFmpeg's SBC decoder).
-# The rest of this crate is MIT. Build without `ble` and no LGPL code is
-# compiled into your binary.
+# The rest of this crate is MIT. See the `usb` note above — any transport that
+# carries board audio needs the decoder.
 ble = ["dep:btleplug", "dep:futures-util", "dep:msbc-decoder"]
 # Factory test commands (e.g. shutdown 0x5E)
 test-mode = []
@@ -57,8 +62,9 @@ cpal = { version = "0.15", optional = true }
 # BLE Vendor GATT (ble feature)
 btleplug = { version = "0.12", optional = true }
 futures-util = { version = "0.3", optional = true }
-# mSBC decoding for the BLE audio path. Separate crate because it is
-# LGPL-2.1-or-later while this crate is MIT — see the `ble` feature comment.
+# mSBC decoding for the board audio path (USB vendor HID and BLE alike).
+# Separate crate because it is LGPL-2.1-or-later while this crate is MIT —
+# see the `usb` / `ble` feature comments.
 msbc-decoder = { version = "0.1", path = "msbc-decoder", optional = true }
 
 [target.'cfg(target_os = "macos")'.dependencies]
@@ -67,3 +73,6 @@ hidapi = { version = "2.6", features = ["macos-shared-device"], optional = true 
 [dev-dependencies]
 tempfile = "3"
 env_logger = "0.11"
+# Examples wait on Ctrl-C; `signal` is example-only so library consumers do not
+# pay for the signal driver.
+tokio = { version = "1", default-features = false, features = ["signal"] }

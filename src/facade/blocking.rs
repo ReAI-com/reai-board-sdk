@@ -162,6 +162,61 @@ impl BoardDeviceBlocking {
     pub fn set_audio_frame_sink(&self, sink: Arc<dyn AudioFrameSink>) {
         self.device.set_audio_frame_sink(sink);
     }
+
+    /// 板载音频的启动路径。只注册 sink 是不够的——音频流默认关着,
+    /// 不透传这几个方法的话,同步侧的调用方注册完 sink 会永远等不到回调。
+    pub fn query_audio_capabilities(
+        &self,
+    ) -> anyhow::Result<crate::kernel::audio::AudioCapabilities> {
+        self.handle.block_on(self.device.query_audio_capabilities())
+    }
+    pub fn control_audio_stream(
+        &self,
+        action: crate::kernel::audio::AudioStreamAction,
+        transport: crate::kernel::audio::AudioTransport,
+        scope: crate::kernel::audio::AudioStreamScope,
+        lease_id: u32,
+        ttl_ms: u16,
+    ) -> anyhow::Result<crate::kernel::audio::AudioStreamState> {
+        self.handle.block_on(
+            self.device
+                .control_audio_stream(action, transport, scope, lease_id, ttl_ms),
+        )
+    }
+    pub fn start_board_audio(
+        &self,
+        transport: crate::kernel::audio::AudioTransport,
+        scope: crate::kernel::audio::AudioStreamScope,
+        lease_id: u32,
+        ttl_ms: u16,
+    ) -> anyhow::Result<crate::kernel::audio::AudioStreamState> {
+        self.handle.block_on(
+            self.device
+                .start_board_audio(transport, scope, lease_id, ttl_ms),
+        )
+    }
+    pub fn start_board_audio_reader(
+        &self,
+        transport: crate::kernel::audio::AudioTransport,
+    ) -> anyhow::Result<()> {
+        self.handle
+            .block_on(self.device.start_board_audio_reader(transport))
+    }
+    pub fn start_legacy_ble_session_reader(&self) -> anyhow::Result<()> {
+        self.device.start_legacy_ble_session_reader()
+    }
+    pub fn start_usb_uac_compat(&self) -> anyhow::Result<()> {
+        self.device.start_usb_uac_compat()
+    }
+    pub fn stop_local_audio_reader(&self) {
+        self.device.stop_local_audio_reader();
+    }
+    pub fn audio_capabilities(&self) -> crate::kernel::audio::AudioCapabilities {
+        self.device.audio_capabilities()
+    }
+    pub fn active_audio_transport(&self) -> Option<crate::kernel::audio::AudioTransport> {
+        self.device.active_audio_transport()
+    }
     #[cfg(feature = "ble")]
     pub fn set_ble_target(&self, name: Option<&str>) {
         self.device.set_ble_target(name);

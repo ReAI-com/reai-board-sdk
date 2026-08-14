@@ -5,11 +5,10 @@
 use std::collections::HashMap;
 
 use anyhow::{anyhow, Result};
-use cpal::traits::{DeviceTrait, HostTrait};
-use hidapi::{DeviceInfo, HidApi, HidDevice};
+use hidapi::{BusType, DeviceInfo, HidApi, HidDevice};
 
 use crate::kernel::protocol_hid::*;
-use crate::kernel::types::{is_usb_audio_device_name, ConnectionType};
+use crate::kernel::types::ConnectionType;
 
 /// 设备连接(封装 HidDevice)
 pub struct DeviceConnection {
@@ -88,23 +87,15 @@ impl DeviceManager {
             .any(|d| d.vendor_id() == VID && is_target_pid(d.product_id()))
     }
 
-    /// 检测连接类型:USB(有 USB Audio)或 BLE
+    /// 检测连接类型，只看 HID bus。不得因设备检测枚举 CoreAudio/WASAPI 输入。
     #[allow(dead_code)]
     pub fn detect_connection_type(&self) -> Option<ConnectionType> {
-        // 优先级 1: USB — 通过 cpal 检测 USB Audio 设备
-        let host = cpal::default_host();
-        if let Ok(devices) = host.input_devices() {
-            for device in devices {
-                if let Ok(config) = device.default_input_config() {
-                    if config.sample_rate().0 == 16000 && config.channels() == 1 {
-                        let name = device.name().unwrap_or_default();
-                        if is_usb_audio_device_name(&name) {
-                            log::debug!(target: "hid", "检测到 USB Audio: {},连接类型: USB", name);
-                            return Some(ConnectionType::Usb);
-                        }
-                    }
-                }
-            }
+        if self.hid_api.device_list().any(|device| {
+            device.vendor_id() == VID
+                && is_target_pid(device.product_id())
+                && matches!(device.bus_type(), BusType::Usb | BusType::Unknown)
+        }) {
+            return Some(ConnectionType::Usb);
         }
 
         // 优先级 2: BLE — 通过 HID 枚举检测

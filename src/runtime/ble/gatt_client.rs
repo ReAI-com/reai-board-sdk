@@ -32,7 +32,7 @@ use crate::kernel::protocol_hid::{
 };
 #[cfg(feature = "test-mode")]
 use crate::kernel::protocol_hid::{parse_factory_key_event_unscoped, CMD_AI_FACTORY_KEY_EVENT};
-use crate::kernel::sink::AudioFrameSink;
+use crate::kernel::sink::{AudioFrameSink, EncodedAudioDecoderSink};
 
 /// Bluetooth CCC(Client Characteristic Configuration)描述符的标准 UUID。
 ///
@@ -122,6 +122,13 @@ pub struct VendorGattClient {
     /// 用 tokio::sync::Mutex —— 持锁期间会 `.await send_command()`(std Mutex 跨 await 是 UB)。
     write_lock: tokio::sync::Mutex<()>,
     seq: AtomicU64,
+    /// Monotonic local epoch for every notification-loop lifetime/reconnect.
+    audio_connection_epoch: AtomicU64,
+    /// FE63 may be subscribed for connection health, but frames reach the Host only after an
+    /// explicit board-audio route/lease activates this gate.
+    audio_enabled: Arc<AtomicBool>,
+    /// Changes on every route gate transition so queued packets cannot cross session bounds.
+    audio_route_epoch: Arc<AtomicU64>,
     /// 通知监听 task 的 JoinHandle。`disconnect` 时 await,避免重连场景下
     /// 旧 task 末尾的 `pending.clear()` 清掉新 task 刚注册的 pending response。
     notify_handle: Mutex<Option<tokio::task::JoinHandle<()>>>,
@@ -145,6 +152,9 @@ impl VendorGattClient {
             pending_responses: Arc::new(Mutex::new(HashMap::new())),
             write_lock: tokio::sync::Mutex::new(()),
             seq: AtomicU64::new(0),
+            audio_connection_epoch: AtomicU64::new(0),
+            audio_enabled: Arc::new(AtomicBool::new(false)),
+            audio_route_epoch: Arc::new(AtomicU64::new(0)),
             notify_handle: Mutex::new(None),
             audio_thread_handle: Mutex::new(None),
         }
@@ -345,6 +355,12 @@ impl VendorGattClient {
         .map_err(|e| anyhow::anyhow!("GATT 写入失败: {}", e))
     }
 
+    pub fn set_audio_enabled(&self, enabled: bool) {
+        if self.audio_enabled.swap(enabled, Ordering::SeqCst) != enabled {
+            self.audio_route_epoch.fetch_add(1, Ordering::SeqCst);
+        }
+    }
+
     /// 发送命令并等待 Event 通道的匹配响应(持 write_lock 序列化)
     pub async fn send_command_and_read_response(
         &self,
@@ -416,23 +432,46 @@ impl VendorGattClient {
         let event_uuid = protocol::EVENT_CHAR_UUID;
         let audio_uuid = protocol::AUDIO_CHAR_UUID;
 
-        // 音频处理 channel:通知循环投递帧,独立线程解码(on_msbc_frame)
-        let (audio_tx, audio_rx) = std::sync::mpsc::sync_channel::<Vec<u8>>(64);
+        // 音频处理 channel:通知循环投递帧,独立线程解码。Full 时显式累计
+        // local-drop；它与设备 sequence gap 分开上报，不能把时间线悄悄缩短。
+        let (audio_tx, audio_rx) = std::sync::mpsc::sync_channel::<(Vec<u8>, u64, u64)>(64);
+        // Producer-owned count attached to the first packet after the lost sequence range.
+        let audio_local_drops = Arc::new(AtomicU64::new(0));
         let audio_running = running.clone();
-        let audio_handler = audio_sink.clone();
+        let connection_epoch = self.audio_connection_epoch.fetch_add(1, Ordering::SeqCst) + 1;
+        let decoder = EncodedAudioDecoderSink::new(audio_sink.clone(), connection_epoch);
+        let decoder_enabled = self.audio_enabled.clone();
+        let decoder_route_epoch = self.audio_route_epoch.clone();
+        let producer_enabled = self.audio_enabled.clone();
+        let producer_route_epoch = self.audio_route_epoch.clone();
         let audio_thread = std::thread::spawn(move || {
-            const MSBC_FRAME_SIZE: usize = 57;
             let mut processed: u64 = 0;
+            let mut active_route_epoch = None;
             while audio_running.load(Ordering::SeqCst) {
                 match audio_rx.recv_timeout(std::time::Duration::from_secs(1)) {
-                    Ok(data) => {
-                        if let Some((_flag, frames_data)) = protocol::parse_audio_packet(&data) {
-                            for frame in frames_data.chunks(MSBC_FRAME_SIZE) {
-                                if frame.len() == MSBC_FRAME_SIZE {
-                                    audio_handler.on_msbc_frame(frame);
-                                    processed += 1;
+                    Ok((data, local_drops, route_epoch)) => {
+                        if !decoder_enabled.load(Ordering::SeqCst)
+                            || decoder_route_epoch.load(Ordering::SeqCst) != route_epoch
+                        {
+                            continue;
+                        }
+                        if active_route_epoch != Some(route_epoch) {
+                            decoder.reset_sequence();
+                            active_route_epoch = Some(route_epoch);
+                        }
+                        let packet = protocol::parse_audio_packet_v1(&data).or_else(|| {
+                            protocol::parse_audio_packet(&data).map(|(_, payload)| {
+                                crate::kernel::audio::EncodedAudioPacket {
+                                    payload,
+                                    transport: crate::kernel::audio::AudioTransport::BleGatt,
+                                    sequence: None,
+                                    device_discontinuity: false,
                                 }
-                            }
+                            })
+                        });
+                        if let Some(packet) = packet {
+                            decoder.on_packet(packet, local_drops);
+                            processed += 1;
                         } else {
                             log::warn!(target: "gatt", "[GATT-audio] 解析失败: data_len={}", data.len());
                         }
@@ -465,6 +504,7 @@ impl VendorGattClient {
             // 靠 is_connected() 主动探测。10s 无通知即检查。
             let heartbeat = std::time::Duration::from_secs(10);
             let mut last_notif = tokio::time::Instant::now();
+            let mut last_audio_route_epoch = producer_route_epoch.load(Ordering::SeqCst);
 
             while running.load(Ordering::SeqCst) {
                 tokio::select! {
@@ -475,10 +515,35 @@ impl VendorGattClient {
                                 notif_count += 1;
                                 if notif.uuid == audio_uuid {
                                     audio_count += 1;
+                                    // Route gating happens before enqueue so packets received while
+                                    // disabled cannot be decoded after a later START races with this
+                                    // notification loop.
+                                    if !producer_enabled.load(Ordering::SeqCst) {
+                                        audio_local_drops.store(0, Ordering::SeqCst);
+                                        continue;
+                                    }
+                                    let route_epoch = producer_route_epoch.load(Ordering::SeqCst);
+                                    if route_epoch != last_audio_route_epoch {
+                                        audio_local_drops.store(0, Ordering::SeqCst);
+                                        last_audio_route_epoch = route_epoch;
+                                    }
                                     // try_send:通道满丢帧保连接,不阻塞通知循环
-                                    match audio_tx.try_send(notif.value.to_vec()) {
+                                    let pending_drops = audio_local_drops.swap(0, Ordering::SeqCst);
+                                    match audio_tx.try_send((
+                                        notif.value.to_vec(),
+                                        pending_drops,
+                                        route_epoch,
+                                    )) {
                                         Ok(_) => {}
-                                        Err(std::sync::mpsc::TrySendError::Full(_)) => {
+                                        Err(std::sync::mpsc::TrySendError::Full((
+                                            _,
+                                            before,
+                                            _,
+                                        ))) => {
+                                            audio_local_drops.fetch_add(
+                                                before.saturating_add(1),
+                                                Ordering::SeqCst,
+                                            );
                                             if audio_count.is_multiple_of(100) {
                                                 log::warn!(target: "gatt", "[GATT] 音频帧丢弃(通道满): total={}", audio_count);
                                             }

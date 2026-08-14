@@ -21,7 +21,9 @@ use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
 use reai_board_sdk::sink::PcmSink;
-use reai_board_sdk::{BoardConfig, BoardDevice, BoardEvent};
+use reai_board_sdk::{
+    AudioStreamAction, AudioStreamScope, AudioTransport, BoardConfig, BoardDevice, BoardEvent,
+};
 
 #[tokio::main]
 async fn main() {
@@ -43,12 +45,61 @@ async fn main() {
     println!("扫描 REAI_VB_ → 连接,验证按键/模式/音频 + 断线重连,Ctrl+C 退出\n");
 
     let mut events = device.events();
+    let lease_id = 0x5052_4F42;
+    let mut managed_lease = false;
+    let mut legacy_session = false;
+    let mut heartbeat = tokio::time::interval(Duration::from_secs(2));
     loop {
-        match events.recv().await {
-            Ok(Some(evt)) => print_event(&evt),
-            Ok(None) => break,
-            Err(e) => eprintln!("[事件错误] {:?}", e),
+        tokio::select! {
+            _ = tokio::signal::ctrl_c() => break,
+            _ = heartbeat.tick(), if managed_lease => {
+                if let Err(error) = device.control_audio_stream(
+                    AudioStreamAction::Heartbeat, AudioTransport::BleGatt,
+                    AudioStreamScope::Session, lease_id, 5_000,
+                ).await {
+                    eprintln!("[音频 heartbeat] {error}");
+                    managed_lease = false;
+                    device.stop_local_audio_reader();
+                }
+            }
+            event = events.recv() => match event {
+                Ok(Some(evt)) => {
+                    let connected_ble = matches!(&evt, BoardEvent::Connection(c)
+                        if c.connected && c.connection_type == Some(reai_board_sdk::ConnectionType::Ble));
+                    print_event(&evt);
+                    if connected_ble && !managed_lease && !legacy_session {
+                        match device.start_board_audio(
+                            AudioTransport::BleGatt, AudioStreamScope::Session,
+                            lease_id, 5_000,
+                        ).await {
+                            Ok(_) => managed_lease = true,
+                            Err(error) => {
+                                eprintln!("[版本化 BLE 音频不可用] {error}; 尝试旧固件 session-only");
+                                match device.start_legacy_ble_session_reader() {
+                                    Ok(()) => legacy_session = true,
+                                    Err(error) => eprintln!("[旧 BLE 音频] {error}"),
+                                }
+                            }
+                        }
+                    }
+                }
+                Ok(None) => break,
+                Err(e) => eprintln!("[事件错误] {:?}", e),
+            }
         }
+    }
+    if managed_lease {
+        let _ = device
+            .control_audio_stream(
+                AudioStreamAction::Stop,
+                AudioTransport::BleGatt,
+                AudioStreamScope::Session,
+                lease_id,
+                5_000,
+            )
+            .await;
+    } else {
+        device.stop_local_audio_reader();
     }
     device.shutdown();
 }

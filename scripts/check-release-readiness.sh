@@ -54,12 +54,25 @@ deny_fixed \
   'public SDK product surfaces use ReAI-Vibe-Board' \
   Cargo.toml README.md README.zh-CN.md src/lib.rs examples
 
-usb_tree=$(cargo tree -p reai-board-sdk -e normal --prefix none \
-  --no-default-features --features usb)
-if grep -F -q -- 'msbc-decoder ' <<<"$usb_tree"; then
-  fail 'USB-only dependency tree excludes LGPL msbc-decoder'
+# Board audio is mSBC on every transport, so any transport feature pulls the
+# LGPL decoder. The protocol layer alone is the LGPL-free build, and that is the
+# claim the README makes — verify the claim we actually ship.
+protocol_tree=$(cargo tree -p reai-board-sdk -e normal --prefix none \
+  --no-default-features)
+if grep -F -q -- 'msbc-decoder ' <<<"$protocol_tree"; then
+  fail 'protocol-only dependency tree excludes LGPL msbc-decoder'
 else
-  pass 'USB-only dependency tree excludes LGPL msbc-decoder'
+  pass 'protocol-only dependency tree excludes LGPL msbc-decoder'
+fi
+
+# The LGPL-free build must actually compile, not just resolve dependencies.
+# RUSTFLAGS is cleared on purpose: CI sets `-D warnings` workflow-wide, and the
+# protocol-only build still carries pre-existing dead-code lints. This check is
+# about "does it build", not about lint cleanliness.
+if env RUSTFLAGS= cargo check --quiet --lib --no-default-features >/dev/null 2>&1; then
+  pass 'protocol-only build compiles'
+else
+  fail 'protocol-only build compiles'
 fi
 
 if (( failures > 0 )); then

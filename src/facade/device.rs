@@ -243,6 +243,56 @@ impl BoardDevice {
         self.core.notify_app_online(online).await
     }
 
+    pub async fn query_audio_capabilities(
+        &self,
+    ) -> anyhow::Result<crate::kernel::audio::AudioCapabilities> {
+        self.core.query_audio_capabilities().await
+    }
+
+    pub async fn control_audio_stream(
+        &self,
+        action: crate::kernel::audio::AudioStreamAction,
+        transport: crate::kernel::audio::AudioTransport,
+        scope: crate::kernel::audio::AudioStreamScope,
+        lease_id: u32,
+        ttl_ms: u16,
+    ) -> anyhow::Result<crate::kernel::audio::AudioStreamState> {
+        self.core
+            .control_audio_stream(action, transport, scope, lease_id, ttl_ms)
+            .await
+    }
+
+    pub async fn start_board_audio_reader(
+        &self,
+        transport: crate::kernel::audio::AudioTransport,
+    ) -> anyhow::Result<()> {
+        self.core.start_board_audio_reader(transport).await
+    }
+
+    pub async fn start_board_audio(
+        &self,
+        transport: crate::kernel::audio::AudioTransport,
+        scope: crate::kernel::audio::AudioStreamScope,
+        lease_id: u32,
+        ttl_ms: u16,
+    ) -> anyhow::Result<crate::kernel::audio::AudioStreamState> {
+        self.core
+            .start_board_audio(transport, scope, lease_id, ttl_ms)
+            .await
+    }
+
+    pub fn start_legacy_ble_session_reader(&self) -> anyhow::Result<()> {
+        self.core.start_legacy_ble_session_reader()
+    }
+
+    pub fn start_usb_uac_compat(&self) -> anyhow::Result<()> {
+        self.core.start_usb_uac_compat()
+    }
+
+    pub fn stop_local_audio_reader(&self) {
+        self.core.stop_local_audio_reader();
+    }
+
     /// 查询 App 在线状态（CMD 0x66）。
     pub async fn get_app_online(&self) -> anyhow::Result<bool> {
         self.core.get_app_online().await
@@ -385,6 +435,14 @@ impl BoardDevice {
         self.core.auto_reconnect()
     }
 
+    pub fn audio_capabilities(&self) -> crate::kernel::audio::AudioCapabilities {
+        self.core.audio_capabilities()
+    }
+
+    pub fn active_audio_transport(&self) -> Option<crate::kernel::audio::AudioTransport> {
+        self.core.active_audio_transport()
+    }
+
     /// 当前工作模式快照。
     ///
     /// 仅由固件 `CMD_STATUS / 0xC9` 或模式键产生的
@@ -396,7 +454,7 @@ impl BoardDevice {
         *self.current_work_mode.lock().unwrap()
     }
 
-    /// 设置 PCM sink(USB Audio 直送;BLE mSBC 经 MsbcDecoderSink 解码后送)。须在 start 前调。
+    /// 设置 PCM sink(板载 mSBC 经 EncodedAudioDecoderSink 解码后送;UAC 兼容路径直送)。须在 start 前调。
     pub fn set_pcm_sink(&self, sink: Arc<dyn PcmSink>) {
         self.core.set_pcm_sink(sink);
     }

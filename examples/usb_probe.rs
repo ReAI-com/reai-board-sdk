@@ -1,4 +1,4 @@
-//! USB smoke test: HID events + USB Audio PCM streams + auto-reconnect.
+//! USB smoke test: HID events + explicit Vendor HID audio + auto-reconnect.
 //!
 //! Quick start:
 //! ```sh
@@ -7,22 +7,22 @@
 //! Requires the board connected via USB (VID `0x363C`, PID `0xED20`).
 //!
 //! 简体中文：
-//! USB 真机冒烟验证：HID 事件 + USB Audio PCM 两条数据流 + 断线重连。
+//! USB 真机冒烟验证：HID 事件 + 显式 Vendor HID 音频租约 + 断线重连。
 //! 需要：USB 连接 ReAI-Vibe-Board（VID=0x363C, PID=0xED20）。
-//! SDK 是纯数据采集层：读 HID（Config `0xFFA0` / Consumer `0x000C`）+ USB Audio，
+//! SDK 是纯数据采集层：读 HID（Config `0xFFA0` / Consumer `0x000C`）
+//! 并在 probe 连接后显式建立 session lease；连接本身不会启动音频。
 //! **不注入系统输入**，因此不需要「辅助功能」。理论上也不需要「输入监控」
 //! （那是 macOS 对**标准键盘 Usage 0x0007** 的保护；本设备按键走 vendor `0xFFA0`
 //! / consumer `0x000C` 接口）—— 若系统仍提示则授权。
-//!
-//! Walks the `BoardDevice` facade (USB Audio capture starts automatically
-//! when `on_connection_change` fires).
 
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use reai_board_sdk::sink::PcmSink;
-use reai_board_sdk::{BoardConfig, BoardDevice, BoardEvent};
+use reai_board_sdk::{
+    AudioStreamAction, AudioStreamScope, AudioTransport, BoardConfig, BoardDevice, BoardEvent,
+};
 
 #[tokio::main]
 async fn main() {
@@ -32,21 +32,61 @@ async fn main() {
 
     let device = BoardDevice::open(BoardConfig::default()).expect("open 失败");
 
-    // USB Audio PCM 统计(USB 连接后 on_connection_change 自动启采集送此 sink)
+    // 注册 sink 不会启动任何系统或板载采集。
     device.set_pcm_sink(Arc::new(StatsSink::new()));
 
     device.start().await.expect("start 失败");
 
-    println!("=== ReAI-Vibe-Board USB Probe ===");
-    println!("HID 事件 + USB Audio PCM 同时监测,拔插验证断线重连,Ctrl+C 退出\n");
+    println!("=== ReAI-Vibe-Board USB Probe (V2) ===");
+    println!("HID 事件 + Vendor HID Audio PCM 同时监测,Ctrl+C 退出\n");
 
     let mut events = device.events();
+    let lease_id = 0x5052_4F42;
+    let mut started = false;
+    let mut heartbeat = tokio::time::interval(Duration::from_secs(2));
     loop {
-        match events.recv().await {
-            Ok(Some(evt)) => print_event(&evt),
-            Ok(None) => break,
-            Err(e) => eprintln!("[事件错误] {:?}", e),
+        tokio::select! {
+            _ = tokio::signal::ctrl_c() => break,
+            _ = heartbeat.tick(), if started => {
+                if let Err(error) = device.control_audio_stream(
+                    AudioStreamAction::Heartbeat, AudioTransport::UsbVendorHid,
+                    AudioStreamScope::Session, lease_id, 5_000,
+                ).await {
+                    eprintln!("[音频 heartbeat] {error}");
+                    started = false;
+                    device.stop_local_audio_reader();
+                }
+            }
+            event = events.recv() => match event {
+                Ok(Some(evt)) => {
+                    let connected_usb = matches!(&evt, BoardEvent::Connection(c)
+                        if c.connected && c.connection_type == Some(reai_board_sdk::ConnectionType::Usb));
+                    print_event(&evt);
+                    if connected_usb {
+                        match device.start_board_audio(
+                            AudioTransport::UsbVendorHid, AudioStreamScope::Session,
+                            lease_id, 5_000,
+                        ).await {
+                            Ok(_) => started = true,
+                            Err(error) => eprintln!("[音频 START] {error}"),
+                        }
+                    }
+                }
+                Ok(None) => break,
+                Err(e) => eprintln!("[事件错误] {:?}", e),
+            }
         }
+    }
+    if started {
+        let _ = device
+            .control_audio_stream(
+                AudioStreamAction::Stop,
+                AudioTransport::UsbVendorHid,
+                AudioStreamScope::Session,
+                lease_id,
+                5_000,
+            )
+            .await;
     }
     device.shutdown();
 }
