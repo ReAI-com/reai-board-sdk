@@ -17,7 +17,8 @@ use anyhow::Result;
 use tokio::sync::broadcast;
 
 use crate::kernel::audio::{
-    AudioCapabilities, AudioStreamAction, AudioStreamScope, AudioStreamState, AudioTransport,
+    AudioCapabilities, AudioCapabilityState, AudioStreamAction, AudioStreamScope, AudioStreamState,
+    AudioTransport,
 };
 use crate::kernel::event::{
     BoardEvent, ConnectionEvent, DeviceInfo, DisconnectReason, ModeChangeEvent, ModeSource,
@@ -78,7 +79,7 @@ pub struct BoardDeviceCore {
     usb_capture: Mutex<Option<UsbAudioCapture>>,
     #[cfg(feature = "usb")]
     usb_hid_audio: Mutex<Option<UsbVendorAudioReader>>,
-    audio_capabilities: Mutex<AudioCapabilities>,
+    audio_capability_state: Mutex<AudioCapabilityState>,
     active_audio_transport: Mutex<Option<AudioTransport>>,
     audio_stream_state: Mutex<Option<AudioStreamState>>,
     audio_connection_epoch: AtomicU64,
@@ -115,7 +116,7 @@ impl BoardDeviceCore {
             usb_capture: Mutex::new(None),
             #[cfg(feature = "usb")]
             usb_hid_audio: Mutex::new(None),
-            audio_capabilities: Mutex::new(AudioCapabilities::default()),
+            audio_capability_state: Mutex::new(AudioCapabilityState::default()),
             active_audio_transport: Mutex::new(None),
             audio_stream_state: Mutex::new(None),
             audio_connection_epoch: AtomicU64::new(0),
@@ -188,7 +189,15 @@ impl BoardDeviceCore {
     }
 
     pub fn audio_capabilities(&self) -> AudioCapabilities {
-        *self.audio_capabilities.lock().unwrap()
+        self.audio_capability_state.lock().unwrap().capabilities()
+    }
+
+    /// Return whether board-audio capabilities are unqueried, unavailable, or ready.
+    ///
+    /// Use this instead of [`Self::audio_capabilities`] when an all-false snapshot must
+    /// not be interpreted as proof that the firmware lacks the capability.
+    pub fn audio_capability_state(&self) -> AudioCapabilityState {
+        *self.audio_capability_state.lock().unwrap()
     }
 
     pub fn active_audio_transport(&self) -> Option<AudioTransport> {
@@ -236,19 +245,10 @@ impl BoardDeviceCore {
         // start_audio_stream/start_usb_uac 调用打开；连接本身绝不触发 cpal/UAC。
         let inner = self.clone();
         hotplug = hotplug.on_connection_change(Box::new(move |ct| {
-            let previous = {
-                let mut connection = inner.connection_type.lock().unwrap();
-                let previous = *connection;
-                *connection = ct;
-                previous
-            };
-            if ct.is_some() && previous != ct {
-                inner.audio_connection_epoch.fetch_add(1, Ordering::SeqCst);
-            }
+            let previous = inner.commit_connection_state(ct);
             if previous.is_some() && previous != ct {
                 inner.stop_local_audio_reader();
                 *inner.audio_stream_state.lock().unwrap() = None;
-                *inner.audio_capabilities.lock().unwrap() = AudioCapabilities::default();
             }
             match ct {
                 Some(ConnectionType::Usb) => {
@@ -334,7 +334,6 @@ impl BoardDeviceCore {
                     }
                     *inner.active_audio_transport.lock().unwrap() = None;
                     *inner.audio_stream_state.lock().unwrap() = None;
-                    *inner.audio_capabilities.lock().unwrap() = AudioCapabilities::default();
                 }
             }
         }));
@@ -392,6 +391,7 @@ impl BoardDeviceCore {
         }
         *self.active_audio_transport.lock().unwrap() = None;
         *self.audio_stream_state.lock().unwrap() = None;
+        self.commit_connection_state(None);
     }
 
     /// 主动断开当前连接。
@@ -413,7 +413,7 @@ impl BoardDeviceCore {
                     if let Some(client) = client {
                         let _ = client.disconnect().await;
                     }
-                    *self.connection_type.lock().unwrap() = None;
+                    self.commit_connection_state(None);
                     let _ = self.event_tx.send(BoardEvent::Connection(ConnectionEvent {
                         connected: false,
                         connection_type: None,
@@ -837,12 +837,59 @@ impl BoardDeviceCore {
 
     /// Query versioned board-audio capabilities. Unsupported/old firmware returns an error;
     /// callers must not infer support from being "latest" or silently fall back to UAC.
+    ///
+    /// The cache advances to `Ready` on success and `Unavailable` on any failed attempt.
     pub async fn query_audio_capabilities(&self) -> Result<AudioCapabilities> {
-        let connection = self
-            .connection()
-            .ok_or_else(|| anyhow::anyhow!("设备未连接"))?;
+        let (connection, query_epoch) = self.audio_capability_query_snapshot()?;
+        let result = self.query_audio_capabilities_uncached(connection).await;
+        let state = match &result {
+            Ok(capabilities) => AudioCapabilityState::Ready(*capabilities),
+            Err(_) => AudioCapabilityState::Unavailable,
+        };
+        if !self.cache_audio_capability_state_if_current(connection, query_epoch, state) {
+            return Err(anyhow::anyhow!(
+                "音频 capability 查询期间连接已变化，请重试"
+            ));
+        }
+        result
+    }
+
+    fn audio_capability_query_snapshot(&self) -> Result<(ConnectionType, u64)> {
+        let connection = self.connection_type.lock().unwrap();
+        let snapshot = (
+            (*connection).ok_or_else(|| anyhow::anyhow!("设备未连接"))?,
+            self.audio_connection_epoch.load(Ordering::SeqCst),
+        );
+        drop(connection);
+        Ok(snapshot)
+    }
+
+    fn cache_audio_capability_state_if_current(
+        &self,
+        expected_connection: ConnectionType,
+        expected_epoch: u64,
+        state: AudioCapabilityState,
+    ) -> bool {
+        let connection = self.connection_type.lock().unwrap();
+        let epoch = self.audio_connection_epoch.load(Ordering::SeqCst);
+        let is_current = capability_query_matches_current_connection(
+            expected_connection,
+            expected_epoch,
+            *connection,
+            epoch,
+        );
+        if is_current {
+            *self.audio_capability_state.lock().unwrap() = state;
+        }
+        is_current
+    }
+
+    async fn query_audio_capabilities_uncached(
+        &self,
+        connection: ConnectionType,
+    ) -> Result<AudioCapabilities> {
         let packet = HidPacket::get_audio_capabilities();
-        let capabilities = match connection {
+        match connection {
             #[cfg(feature = "usb")]
             ConnectionType::Usb => {
                 let (length, response) = self.cmd_via_fresh_usb(packet).await?;
@@ -860,9 +907,18 @@ impl BoardDeviceCore {
             #[cfg(not(feature = "ble"))]
             ConnectionType::Ble => None,
         }
-        .ok_or_else(|| anyhow::anyhow!("固件不支持版本化板载音频 capability"))?;
-        *self.audio_capabilities.lock().unwrap() = capabilities;
-        Ok(capabilities)
+        .ok_or_else(|| anyhow::anyhow!("固件不支持版本化板载音频 capability"))
+    }
+
+    fn commit_connection_state(&self, current: Option<ConnectionType>) -> Option<ConnectionType> {
+        let mut connection = self.connection_type.lock().unwrap();
+        let previous = *connection;
+        if previous != current {
+            *connection = current;
+            self.audio_connection_epoch.fetch_add(1, Ordering::SeqCst);
+            *self.audio_capability_state.lock().unwrap() = AudioCapabilityState::Unqueried;
+        }
+        previous
     }
 
     /// Start/heartbeat/stop a firmware stream lease. This API supports board transports only;
@@ -951,7 +1007,15 @@ impl BoardDeviceCore {
         // 先校验再动传输：校验失败就直接返回，调用方看到 Err 时现有音频原封不动。
         // 反过来的话，"切到一条不支持的传输"会先把正在跑的那条拆掉再报错，
         // 调用方以为什么都没发生，实际音频已经死了、固件那边的租约还活着。
-        let capabilities = self.audio_capabilities();
+        let capabilities = match self.audio_capability_state() {
+            AudioCapabilityState::Ready(capabilities) => capabilities,
+            AudioCapabilityState::Unqueried => {
+                return Err(anyhow::anyhow!("尚未查询当前连接的 audio capability"));
+            }
+            AudioCapabilityState::Unavailable => {
+                return Err(anyhow::anyhow!("当前固件未提供版本化 audio capability"));
+            }
+        };
         if !capabilities.supports(transport) {
             return Err(anyhow::anyhow!("当前 capability 不支持 {:?}", transport));
         }
@@ -1548,6 +1612,15 @@ impl BoardDeviceCore {
     }
 }
 
+fn capability_query_matches_current_connection(
+    expected_connection: ConnectionType,
+    expected_epoch: u64,
+    current_connection: Option<ConnectionType>,
+    current_epoch: u64,
+) -> bool {
+    current_connection == Some(expected_connection) && current_epoch == expected_epoch
+}
+
 // ================================================================
 // 命令交互辅助(USB only)
 // ================================================================
@@ -1724,5 +1797,111 @@ impl crate::kernel::bindings_blob::BlobLink for DeviceBlobLink<'_> {
         parsed
             .map(Some)
             .ok_or_else(|| "blob commit 应答无效".to_string())
+    }
+}
+
+#[cfg(test)]
+mod audio_capability_cache_tests {
+    use super::*;
+    use std::{sync::Arc, thread, time::Instant};
+
+    #[test]
+    fn capability_query_result_only_belongs_to_its_original_connection_epoch() {
+        assert!(capability_query_matches_current_connection(
+            ConnectionType::Usb,
+            7,
+            Some(ConnectionType::Usb),
+            7,
+        ));
+        assert!(!capability_query_matches_current_connection(
+            ConnectionType::Usb,
+            7,
+            Some(ConnectionType::Ble),
+            8,
+        ));
+        assert!(!capability_query_matches_current_connection(
+            ConnectionType::Usb,
+            7,
+            None,
+            7,
+        ));
+        assert!(!capability_query_matches_current_connection(
+            ConnectionType::Usb,
+            7,
+            Some(ConnectionType::Usb),
+            8,
+        ));
+    }
+
+    #[test]
+    fn connection_state_machine_resets_cache_and_rejects_stale_writeback() {
+        let core = BoardDeviceCore::new(HotplugConfig::default()).unwrap();
+        core.commit_connection_state(Some(ConnectionType::Usb));
+        let usb_epoch = core.audio_connection_epoch.load(Ordering::SeqCst);
+        assert!(core.cache_audio_capability_state_if_current(
+            ConnectionType::Usb,
+            usb_epoch,
+            AudioCapabilityState::Ready(AudioCapabilities::default()),
+        ));
+        assert!(core.audio_capability_state().is_ready());
+
+        core.commit_connection_state(None);
+        assert_eq!(
+            core.audio_capability_state(),
+            AudioCapabilityState::Unqueried
+        );
+        core.commit_connection_state(Some(ConnectionType::Ble));
+        assert!(!core.cache_audio_capability_state_if_current(
+            ConnectionType::Usb,
+            usb_epoch,
+            AudioCapabilityState::Unavailable,
+        ));
+        assert_eq!(
+            core.audio_capability_state(),
+            AudioCapabilityState::Unqueried
+        );
+    }
+
+    #[test]
+    fn capability_writeback_holds_connection_lock_until_cache_commit() {
+        let core = Arc::new(BoardDeviceCore::new(HotplugConfig::default()).unwrap());
+        core.commit_connection_state(Some(ConnectionType::Usb));
+        let usb_epoch = core.audio_connection_epoch.load(Ordering::SeqCst);
+
+        // Block the cache write. A safe writeback must keep the connection lock
+        // while it waits, so a concurrent connection transition cannot slip
+        // between the current-connection check and the state write.
+        let state_guard = core.audio_capability_state.lock().unwrap();
+        let writer_core = Arc::clone(&core);
+        let writer = thread::spawn(move || {
+            writer_core.cache_audio_capability_state_if_current(
+                ConnectionType::Usb,
+                usb_epoch,
+                AudioCapabilityState::Ready(AudioCapabilities::default()),
+            )
+        });
+
+        let deadline = Instant::now() + std::time::Duration::from_secs(1);
+        while core.connection_type.try_lock().is_ok() && Instant::now() < deadline {
+            thread::yield_now();
+        }
+        assert!(
+            core.connection_type.try_lock().is_err(),
+            "capability writeback released the connection lock before committing the cache"
+        );
+
+        let transition_core = Arc::clone(&core);
+        let transition = thread::spawn(move || {
+            transition_core.commit_connection_state(Some(ConnectionType::Ble))
+        });
+        drop(state_guard);
+
+        assert!(writer.join().unwrap());
+        assert_eq!(transition.join().unwrap(), Some(ConnectionType::Usb));
+        assert_eq!(core.connection(), Some(ConnectionType::Ble));
+        assert_eq!(
+            core.audio_capability_state(),
+            AudioCapabilityState::Unqueried
+        );
     }
 }

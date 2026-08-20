@@ -214,6 +214,9 @@ impl BoardDeviceBlocking {
     pub fn audio_capabilities(&self) -> crate::kernel::audio::AudioCapabilities {
         self.device.audio_capabilities()
     }
+    pub fn audio_capability_state(&self) -> crate::kernel::audio::AudioCapabilityState {
+        self.device.audio_capability_state()
+    }
     pub fn active_audio_transport(&self) -> Option<crate::kernel::audio::AudioTransport> {
         self.device.active_audio_transport()
     }

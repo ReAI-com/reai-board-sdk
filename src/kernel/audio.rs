@@ -89,6 +89,70 @@ impl AudioCapabilities {
     }
 }
 
+/// Knowledge state of the cached board-audio capabilities.
+///
+/// `Unqueried` and `Unavailable` both expose an all-false capability snapshot,
+/// but they carry different meanings: the former means this connection has not
+/// been checked yet, while the latter means a query was attempted without a
+/// versioned capability response.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[non_exhaustive]
+pub enum AudioCapabilityState {
+    /// No capability query has completed for the current connection.
+    #[default]
+    Unqueried,
+    /// The query was attempted, but no versioned capability response was available.
+    Unavailable,
+    /// The most recent query completed successfully.
+    Ready(AudioCapabilities),
+}
+
+#[cfg(test)]
+mod capability_state_tests {
+    use super::*;
+
+    #[test]
+    fn non_ready_states_keep_the_compatibility_snapshot_empty() {
+        assert_eq!(
+            AudioCapabilityState::Unqueried.capabilities(),
+            AudioCapabilities::default()
+        );
+        assert_eq!(
+            AudioCapabilityState::Unavailable.capabilities(),
+            AudioCapabilities::default()
+        );
+        assert!(!AudioCapabilityState::Unqueried.is_ready());
+        assert!(!AudioCapabilityState::Unavailable.is_ready());
+    }
+
+    #[test]
+    fn ready_state_exposes_the_exact_capability_snapshot() {
+        let capabilities = AudioCapabilities {
+            protocol_version: AUDIO_PROTOCOL_VERSION,
+            usb_vendor_hid_msbc_v1: true,
+            ..AudioCapabilities::default()
+        };
+        let state = AudioCapabilityState::Ready(capabilities);
+        assert_eq!(state.capabilities(), capabilities);
+        assert!(state.is_ready());
+    }
+}
+
+impl AudioCapabilityState {
+    /// Return the capability snapshot; non-ready states return the all-false default.
+    pub fn capabilities(&self) -> AudioCapabilities {
+        match self {
+            Self::Ready(capabilities) => *capabilities,
+            _ => AudioCapabilities::default(),
+        }
+    }
+
+    /// Whether a capability query completed successfully for the current connection.
+    pub fn is_ready(&self) -> bool {
+        matches!(self, Self::Ready(_))
+    }
+}
+
 /// Resolve a transport without ever turning Board-first into an implicit OS input request.
 pub fn resolve_audio_transport(
     request: AudioRouteRequest,

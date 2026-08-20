@@ -439,6 +439,11 @@ impl BoardDevice {
         self.core.audio_capabilities()
     }
 
+    /// Return whether board-audio capabilities are unqueried, unavailable, or ready.
+    pub fn audio_capability_state(&self) -> crate::kernel::audio::AudioCapabilityState {
+        self.core.audio_capability_state()
+    }
+
     pub fn active_audio_transport(&self) -> Option<crate::kernel::audio::AudioTransport> {
         self.core.active_audio_transport()
     }
