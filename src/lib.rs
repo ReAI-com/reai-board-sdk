@@ -43,8 +43,8 @@ pub mod facade;
 
 // ============ Top-level re-exports ============
 pub use kernel::audio::{
-    AudioCapabilities, AudioFrame, AudioRouteRequest, AudioStreamAction, AudioStreamScope,
-    AudioStreamState, AudioTransport,
+    AudioCapabilities, AudioCapabilityState, AudioFrame, AudioRouteRequest, AudioStreamAction,
+    AudioStreamScope, AudioStreamState, AudioTransport,
 };
 pub use kernel::error::{BoardError, Result};
 #[cfg(feature = "test-mode")]
