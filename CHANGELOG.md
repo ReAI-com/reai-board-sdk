@@ -5,6 +5,17 @@ follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Fixed
+
+- USB commands now reuse one command-only HID connection for the lifetime of a
+  physical USB connection instead of opening and closing `HidApi` / `HidDevice`
+  for every heartbeat. The command handle remains separate from the config
+  monitor and audio reader, complete write/read transactions stay serialized,
+  and the cached handle is invalidated on reconnect, I/O failure, or DFU entry.
+  Failed commands are not replayed automatically.
+- Added regression coverage for connection reuse, reconnect epochs, I/O and
+  open failures, serialized concurrent transactions, and DFU invalidation.
+
 ## [0.3.0] — 2026-08-13
 
 ### Added
