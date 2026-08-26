@@ -20,15 +20,15 @@ use btleplug::platform::{Adapter, Peripheral};
 use futures_util::StreamExt;
 use tokio::sync::broadcast;
 
-use crate::kernel::consumer_hold::ConsumerHeldTracker;
+use crate::kernel::consumer_hold::{ConsumerHeldTracker, ConsumerModeTracker};
 use crate::kernel::event::{
     AiVoiceKeyEvent, BoardEvent, ErrorEvent, KeySource, ModeChangeEvent, ModeSource,
 };
 use crate::kernel::key_aggregator::KeyStateAggregator;
 use crate::kernel::protocol_gatt as protocol;
 use crate::kernel::protocol_hid::{
-    find_key_index_by_value, is_ai_voice_consumer_code, key_index_to_mode, WorkMode,
-    CMD_AUDIO_DATA, CMD_DEVICE_DISCONNECT, CMD_STATUS, CMD_WORK_MODE_DATA,
+    is_ai_voice_consumer_code, WorkMode, CMD_AUDIO_DATA, CMD_DEVICE_DISCONNECT, CMD_STATUS,
+    CMD_WORK_MODE_DATA,
 };
 #[cfg(feature = "test-mode")]
 use crate::kernel::protocol_hid::{parse_factory_key_event_unscoped, CMD_AI_FACTORY_KEY_EVENT};
@@ -88,7 +88,7 @@ struct GattEventState {
     /// 延迟创建：它需要事件发送端，而发送端要等 `handle_event` 传进来。
     aggregator: Option<KeyStateAggregator>,
     ai_voice_pressed: bool,
-    mode_key_pressed: usize,
+    mode: ConsumerModeTracker,
 }
 
 impl GattEventState {
@@ -723,6 +723,7 @@ fn handle_event(
                 // 按下/松开事件交给账本 + 聚合器，语义与 USB 完全一致：
                 // 转旋钮不会顶掉按住的键，真正的松手才清空。
                 let frame = state.consumer.on_frame(key_value, Instant::now());
+                let mode_change = state.mode.on_frame(key_value, frame.cleared);
                 let aggregator = state
                     .aggregator
                     .get_or_insert_with(|| KeyStateAggregator::new(event_tx.clone()));
@@ -736,11 +737,8 @@ fn handle_event(
                         event_tx.send(BoardEvent::AiVoiceKey(AiVoiceKeyEvent { pressed: true }));
                 }
 
-                // 模式切换拨杆
-                let dial = find_key_index_by_value(key_value)
-                    .and_then(|index| key_index_to_mode(index).map(|mode| (index, mode)));
-                if let Some((key_index, (mode_value, mode_name))) = dial {
-                    state.mode_key_pressed = key_index;
+                // USB and BLE share one mode tracker; transport differences end here.
+                if let Some((mode_value, mode_name)) = mode_change {
                     let _ = event_tx.send(BoardEvent::ModeChange(ModeChangeEvent {
                         mode: mode_name.to_string(),
                         mode_value,
@@ -750,22 +748,10 @@ fn handle_event(
 
                 // 下面两件事只在账本**真正清空**时做。挂在字面的 0x0000 上是不对的：
                 // 紧跟旋钮那一格的收尾帧也是 0x0000，按住语音键转旋钮会因此误报一次释放。
-                if frame.cleared {
-                    if state.ai_voice_pressed {
-                        state.ai_voice_pressed = false;
-                        let _ = event_tx
-                            .send(BoardEvent::AiVoiceKey(AiVoiceKeyEvent { pressed: false }));
-                    }
-                    // 拨杆松开 → 回到 CHAT
-                    let prev_mode = state.mode_key_pressed;
-                    state.mode_key_pressed = 0;
-                    if prev_mode == 9 || prev_mode == 10 {
-                        let _ = event_tx.send(BoardEvent::ModeChange(ModeChangeEvent {
-                            mode: "CHAT".to_string(),
-                            mode_value: 0,
-                            source: ModeSource::Dial,
-                        }));
-                    }
+                if frame.cleared && state.ai_voice_pressed {
+                    state.ai_voice_pressed = false;
+                    let _ =
+                        event_tx.send(BoardEvent::AiVoiceKey(AiVoiceKeyEvent { pressed: false }));
                 }
             }
         }
@@ -859,6 +845,29 @@ mod tests {
                 _ => None,
             })
             .collect()
+    }
+
+    fn mode_events(rx: &mut broadcast::Receiver<BoardEvent>) -> Vec<(String, u8)> {
+        drain(rx)
+            .into_iter()
+            .filter_map(|event| match event {
+                BoardEvent::ModeChange(mode) => Some((mode.mode, mode.mode_value)),
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn ble_consumer_endpoint_press_and_release_emit_yolo_then_chat() {
+        let (tx, mut rx) = broadcast::channel(16);
+        let pending = Arc::new(Mutex::new(HashMap::new()));
+        let mut state = GattEventState::default();
+
+        handle_event(&key_frame(0x0F0A), &mut state, &tx, &pending);
+        assert_eq!(mode_events(&mut rx), vec![("YOLO".to_string(), 1)]);
+
+        handle_event(&key_frame(0x0000), &mut state, &tx, &pending);
+        assert_eq!(mode_events(&mut rx), vec![("CHAT".to_string(), 0)]);
     }
 
     /// 验证 key_index=0(KEY0,音量A相)的释放事件不会被吞掉。

@@ -283,10 +283,14 @@ impl BoardDeviceCore {
                     });
                 }
                 Some(ConnectionType::Ble) => {
+                    if previous == Some(ConnectionType::Ble) {
+                        return;
+                    }
                     // BLE：notify_connected 在 start_notification_loop() 之前触发，
                     // 此时 GATT notification loop 尚未启动，cmd_via_gatt 会超时。
-                    // 短延迟等 loop 起来再查询。设备信息里包含 BLE 场景刚需的电量，
-                    // 必须像 USB 一样广播 DeviceInfo；各项都是 best-effort，失败只 warn。
+                    // 短延迟等 loop 起来再做一次连接初始化查询。拨杆后续变化由
+                    // Consumer 键事件主动推送，不能轮询占用 GATT 命令通道。
+                    // 设备信息里包含 BLE 场景刚需的电量；各项均 best-effort。
                     let inner = inner.clone();
                     tokio::spawn(async move {
                         tokio::time::sleep(Duration::from_millis(500)).await;

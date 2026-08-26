@@ -21,7 +21,9 @@
 
 use crate::kernel::event::KeySource;
 use crate::kernel::key_aggregator::PressedKeyMeta;
-use crate::kernel::protocol_hid::{find_key_index_by_value, get_key_name, is_knob_pulse_key_index};
+use crate::kernel::protocol_hid::{
+    find_key_index_by_value, get_key_name, is_knob_pulse_key_index, key_index_to_mode,
+};
 use std::time::{Duration, Instant};
 
 /// 旋钮脉冲与它的收尾归零帧之间，允许的最大间隔。
@@ -41,6 +43,42 @@ use std::time::{Duration, Instant};
 /// 转动里连发、走同一条链路，链路慢是一起慢，间隔并不会被拉开。
 /// 反过来窗口越大越危险：转完立刻松手的那一帧会被误吞成收尾，切换器就关不掉了。
 const KNOB_PULSE_TAIL_WINDOW: Duration = Duration::from_millis(100);
+
+/// Restore the three-position mode switch from its Consumer key stream.
+///
+/// Firmware sends the two endpoints as key9/key10 on both USB and BLE. CHAT has
+/// no dedicated contact, so releasing the active endpoint represents the middle
+/// position. Transport adapters feed raw values here instead of maintaining
+/// separate mode state machines.
+#[derive(Default)]
+pub(crate) struct ConsumerModeTracker {
+    active_endpoint: Option<usize>,
+}
+
+impl ConsumerModeTracker {
+    pub(crate) fn on_frame(
+        &mut self,
+        key_value: u16,
+        consumer_cleared: bool,
+    ) -> Option<(u8, &'static str)> {
+        if let Some(key_index) = find_key_index_by_value(key_value) {
+            if let Some(mode) = key_index_to_mode(key_index) {
+                self.active_endpoint = match key_index {
+                    9 | 10 => Some(key_index),
+                    11 => None,
+                    _ => self.active_endpoint,
+                };
+                return Some(mode);
+            }
+        }
+
+        if consumer_cleared && self.active_endpoint.take().is_some() {
+            return key_index_to_mode(11);
+        }
+
+        None
+    }
+}
 
 /// 处理完一帧 Consumer 报文之后要做的事。
 pub(crate) struct ConsumerFrame {
@@ -193,6 +231,24 @@ mod tests {
     const ESC: u16 = 0x0F03;
     const KNOB_CW: u16 = 0x0F08;
     const RELEASE: u16 = 0x0000;
+
+    #[test]
+    fn mode_tracker_turns_endpoint_press_and_release_into_three_stable_modes() {
+        let mut tracker = ConsumerModeTracker::default();
+
+        assert_eq!(tracker.on_frame(0x0F0A, false), Some((1, "YOLO")));
+        assert_eq!(tracker.on_frame(RELEASE, true), Some((0, "CHAT")));
+        assert_eq!(tracker.on_frame(0x0F0B, false), Some((2, "PLAN")));
+        assert_eq!(tracker.on_frame(RELEASE, true), Some((0, "CHAT")));
+    }
+
+    #[test]
+    fn mode_tracker_ignores_unrelated_consumer_release() {
+        let mut tracker = ConsumerModeTracker::default();
+
+        assert_eq!(tracker.on_frame(TAB, false), None);
+        assert_eq!(tracker.on_frame(RELEASE, true), None);
+    }
 
     /// 测试基准时刻。
     fn t0() -> Instant {
