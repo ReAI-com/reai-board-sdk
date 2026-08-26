@@ -56,6 +56,10 @@ pub struct BoardDeviceCore {
     config_conn: Mutex<Option<Arc<Mutex<Option<DeviceConnection>>>>>,
     #[cfg(feature = "usb")]
     monitor_paused: Mutex<Option<Arc<AtomicBool>>>,
+    /// 独立于 monitor / audio reader 的 USB 命令连接。同一物理连接代次内复用，
+    /// 避免 heartbeat 每 2.5 秒 open/close IOHID 句柄。
+    #[cfg(feature = "usb")]
+    usb_command_connection: Arc<Mutex<ReusableCommandConnection<UsbCommandConnection>>>,
 
     #[cfg(feature = "ble")]
     cached_adapter: Arc<Mutex<Option<Adapter>>>,
@@ -82,7 +86,7 @@ pub struct BoardDeviceCore {
     audio_capability_state: Mutex<AudioCapabilityState>,
     active_audio_transport: Mutex<Option<AudioTransport>>,
     audio_stream_state: Mutex<Option<AudioStreamState>>,
-    audio_connection_epoch: AtomicU64,
+    audio_connection_epoch: Arc<AtomicU64>,
 }
 
 impl BoardDeviceCore {
@@ -100,6 +104,8 @@ impl BoardDeviceCore {
             config_conn: Mutex::new(None),
             #[cfg(feature = "usb")]
             monitor_paused: Mutex::new(None),
+            #[cfg(feature = "usb")]
+            usb_command_connection: Arc::new(Mutex::new(ReusableCommandConnection::default())),
             #[cfg(feature = "ble")]
             cached_adapter: Arc::new(Mutex::new(None)),
             #[cfg(feature = "ble")]
@@ -119,7 +125,7 @@ impl BoardDeviceCore {
             audio_capability_state: Mutex::new(AudioCapabilityState::default()),
             active_audio_transport: Mutex::new(None),
             audio_stream_state: Mutex::new(None),
-            audio_connection_epoch: AtomicU64::new(0),
+            audio_connection_epoch: Arc::new(AtomicU64::new(0)),
         })
     }
 
@@ -441,7 +447,7 @@ impl BoardDeviceCore {
         match conn_type {
             #[cfg(feature = "usb")]
             ConnectionType::Usb => {
-                let (len, buf) = self.cmd_via_fresh_usb(HidPacket::get_device_info()).await?;
+                let (len, buf) = self.cmd_via_usb(HidPacket::get_device_info()).await?;
                 if len < 24 {
                     return Err(anyhow::anyhow!("设备信息响应长度不足: {}", len));
                 }
@@ -480,7 +486,7 @@ impl BoardDeviceCore {
         match conn_type {
             #[cfg(feature = "usb")]
             ConnectionType::Usb => {
-                let (len, buf) = self.cmd_via_fresh_usb(HidPacket::get_key_config()).await?;
+                let (len, buf) = self.cmd_via_usb(HidPacket::get_key_config()).await?;
                 if len < 64 {
                     return Err(anyhow::anyhow!("按键配置响应长度不足: {}", len));
                 }
@@ -527,7 +533,7 @@ impl BoardDeviceCore {
             #[cfg(feature = "usb")]
             ConnectionType::Usb => {
                 let (len, buf) = self
-                    .cmd_via_fresh_usb(HidPacket::set_key_config(&config.to_bytes()))
+                    .cmd_via_usb(HidPacket::set_key_config(&config.to_bytes()))
                     .await?;
                 if len < 4 {
                     return Err(anyhow::anyhow!("写入响应长度不足: {}", len));
@@ -593,7 +599,7 @@ impl BoardDeviceCore {
         match conn_type {
             #[cfg(feature = "usb")]
             ConnectionType::Usb => {
-                let (len, response) = self.cmd_via_fresh_usb(packet).await?;
+                let (len, response) = self.cmd_via_usb(packet).await?;
                 parse_factory_key_control_ack(&response[..len], session)
                     .map_err(anyhow::Error::from)
             }
@@ -623,7 +629,7 @@ impl BoardDeviceCore {
         match conn_type {
             #[cfg(feature = "usb")]
             ConnectionType::Usb => {
-                let (len, response) = self.cmd_via_fresh_usb(packet).await?;
+                let (len, response) = self.cmd_via_usb(packet).await?;
                 parse_silent_record_hid_response(&response[..len], expected_cmd)
                     .ok_or_else(|| anyhow::anyhow!("静默录音响应无效或命令失败"))
             }
@@ -697,7 +703,7 @@ impl BoardDeviceCore {
         match conn_type {
             #[cfg(feature = "usb")]
             ConnectionType::Usb => {
-                let (len, response) = self.cmd_via_fresh_usb(HidPacket::get_work_mode()).await?;
+                let (len, response) = self.cmd_via_usb(HidPacket::get_work_mode()).await?;
                 let parsed = parse_work_mode_hid_response(&response[..len]);
                 if parsed.is_none() {
                     log::warn!(target: "board", "[work-mode] HID 响应解析失败，原始响应: {}", fmt_hex_prefix_len(&response, len));
@@ -772,7 +778,7 @@ impl BoardDeviceCore {
         match conn_type {
             #[cfg(feature = "usb")]
             ConnectionType::Usb => {
-                let (len, response) = self.cmd_via_fresh_usb(packet).await?;
+                let (len, response) = self.cmd_via_usb(packet).await?;
                 let parsed = parse_sleep_timeout_hid_response(&response[..len], expected_cmd);
                 if parsed.is_none() {
                     log::warn!(target: "board", "[sleep-timeout] HID 响应解析失败，原始响应: {}", fmt_hex_prefix_len(&response, len));
@@ -813,7 +819,7 @@ impl BoardDeviceCore {
         match conn_type {
             #[cfg(feature = "usb")]
             ConnectionType::Usb => {
-                let (_len, _response) = self.cmd_via_fresh_usb(packet).await?;
+                let (_len, _response) = self.cmd_via_usb(packet).await?;
             }
             #[cfg(not(feature = "usb"))]
             ConnectionType::Usb => {
@@ -892,7 +898,7 @@ impl BoardDeviceCore {
         match connection {
             #[cfg(feature = "usb")]
             ConnectionType::Usb => {
-                let (length, response) = self.cmd_via_fresh_usb(packet).await?;
+                let (length, response) = self.cmd_via_usb(packet).await?;
                 parse_audio_capabilities_hid_response(&response[..length])
             }
             #[cfg(not(feature = "usb"))]
@@ -939,7 +945,7 @@ impl BoardDeviceCore {
         let response = match self.connection() {
             #[cfg(feature = "usb")]
             Some(ConnectionType::Usb) => {
-                let (length, response) = self.cmd_via_fresh_usb(packet).await?;
+                let (length, response) = self.cmd_via_usb(packet).await?;
                 parse_audio_stream_hid_response(&response[..length])
             }
             #[cfg(not(feature = "usb"))]
@@ -1186,7 +1192,7 @@ impl BoardDeviceCore {
         match conn_type {
             #[cfg(feature = "usb")]
             ConnectionType::Usb => {
-                let (len, response) = self.cmd_via_fresh_usb(packet).await?;
+                let (len, response) = self.cmd_via_usb(packet).await?;
                 parse_app_online_hid_response(&response[..len], expected_cmd)
                     .ok_or_else(|| anyhow::anyhow!("App 在线状态响应无效或命令失败"))
             }
@@ -1215,7 +1221,7 @@ impl BoardDeviceCore {
         match conn_type {
             #[cfg(feature = "usb")]
             ConnectionType::Usb => {
-                let (len, response) = self.cmd_via_fresh_usb(packet).await?;
+                let (len, response) = self.cmd_via_usb(packet).await?;
                 let parsed = parse_open_url_hid_response(&response[..len], expected_cmd);
                 if parsed.is_none() {
                     log::warn!(target: "board", "[open-url] HID 响应解析失败，原始响应: {}", fmt_hex_prefix_len(&response, len));
@@ -1283,11 +1289,11 @@ impl BoardDeviceCore {
         }
         log::info!(target: "board", "[dfu] runtime: 开始升级 {firmware_path:?} ({} bytes)", total_len);
 
-        // 1. 进 DFU：发 CMD 0xEF（通过正常 USB HID 通道；cmd_via_fresh_usb 内部已 PauseGuard）
+        // 1. 进 DFU：发 CMD 0xEF（通过正常 USB HID 通道；cmd_via_usb 内部已 PauseGuard）
         log::info!(target: "board", "[dfu] runtime: 发送 CMD 0xEF 进入 DFU 模式");
         let enter_cmd = build_enter_dfu_hid_command();
         // 发完命令设备会立即开始重启，read 可能超时/失败 —— 这是正常的（设备已离线）
-        if let Err(e) = self.cmd_via_fresh_usb(enter_cmd).await {
+        if let Err(e) = self.cmd_via_usb(enter_cmd).await {
             log::warn!(target: "board", "[dfu] runtime: CMD 0xEF 响应未收到（设备重启中），继续等待 DFU 设备: {e}");
         }
 
@@ -1416,7 +1422,7 @@ impl BoardDeviceCore {
         match conn_type {
             #[cfg(feature = "usb")]
             ConnectionType::Usb => {
-                self.cmd_via_fresh_usb(cmd).await?;
+                self.cmd_via_usb(cmd).await?;
             }
             #[cfg(not(feature = "usb"))]
             ConnectionType::Usb => {
@@ -1442,60 +1448,65 @@ impl BoardDeviceCore {
     // 命令路径(private)
     // ================================================================
 
-    /// USB:新建独立 HidApi 连接发命令(共享连接会让固件崩溃)。
+    /// USB:复用独立于 monitor / audio reader 的命令连接。
+    ///
+    /// 历史上禁止的是命令与 monitor 共用同一 handle（会争抢响应并导致固件异常）；
+    /// 此处仍保持独立 handle，只把它的生命周期延长到当前 USB 连接代次。整条
+    /// cache/open/write/matching-read/invalidate transaction 都放在同一个 HID RunLoop
+    /// job 内，heartbeat 与用户命令不会交叉读响应。
     /// PauseGuard 暂停 monitor 防吃响应。返回 (实际读取长度, 缓冲区)。
     #[cfg(feature = "usb")]
-    async fn cmd_via_fresh_usb(&self, cmd: [u8; 64]) -> Result<(usize, [u8; 64])> {
+    async fn cmd_via_usb(&self, cmd: [u8; 64]) -> Result<(usize, [u8; 64])> {
         let paused_arc = self.monitor_paused.lock().unwrap().clone();
+        let command_connection = self.usb_command_connection.clone();
+        let connection_epoch = self.audio_connection_epoch.clone();
+        let invalidate_after = should_invalidate_usb_command_after(&cmd);
         log::debug!(target: "board", "[USB→] 发送 HID (CMD=0x{:02X}): {}", cmd[1], fmt_hex_prefix(&cmd));
         // 用 spawn_blocking_with_runloop：hidapi 的 IOKit 调用需要 CFRunLoop。
         let result = spawn_blocking_with_runloop::<_, Result<(usize, [u8; 64])>>(move || {
             let _guard = PauseGuard::new(paused_arc);
-
-            let api = hidapi::HidApi::new()?;
-            let dev_info = api
-                .device_list()
-                .find(|d| {
-                    d.vendor_id() == VID
-                        && is_target_pid(d.product_id())
-                        && d.usage_page() == USAGE_PAGE_CONFIG
-                        && d.usage() == 0x0002
-                })
-                .or_else(|| {
-                    api.device_list().find(|d| {
-                        d.vendor_id() == VID
-                            && is_target_pid(d.product_id())
-                            && d.usage_page() == USAGE_PAGE_CONFIG
-                    })
-                })
-                .ok_or_else(|| anyhow::anyhow!("未找到 Config 接口"))?;
-            let device = api.open_path(dev_info.path())?;
-            device.write(&cmd)?;
-            // Config(0xFFA0) 与 Audio(0xFFAA) 是同一个物理 HID 接口上的两个顶层集合，
-            // macOS 按 path 打开拿到的是整条接口——板载音频一开，命令响应就淹没在
-            // 每秒上百个 0xB1 音频包里。只读一个报告会把音频包当成响应，表现是
-            // "响应无效"，而且录音期间任何命令都会偶发中招。按报告类型筛出真正的响应。
-            let deadline = std::time::Instant::now() + Duration::from_millis(3000);
-            let mut buf = [0u8; 64];
-            let mut fallback: Option<(usize, [u8; 64])> = None;
-            loop {
-                let remaining = deadline.saturating_duration_since(std::time::Instant::now());
-                if remaining.is_zero() {
-                    // 超时前没等到对得上的响应：把最后一个命令响应交回去，
-                    // 让上层解析器给出比"读超时"更具体的错误。
-                    return fallback.ok_or_else(|| anyhow::anyhow!("HID 命令响应读取超时"));
-                }
-                let len = device.read_timeout(&mut buf, remaining.as_millis() as i32)?;
-                if len == 0 {
-                    continue;
-                }
-                match classify_command_report(&buf[..len], cmd[1]) {
-                    CommandReportKind::Match => return Ok((len, buf)),
-                    // 是命令响应，但不是这条命令的（异步上报等）：留作超时兜底。
-                    CommandReportKind::OtherCommand => fallback = Some((len, buf)),
-                    CommandReportKind::NotCommand => {}
-                }
+            let epoch = connection_epoch.load(Ordering::SeqCst);
+            let mut cache = command_connection
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            let transaction =
+                cache.with_connection(epoch, UsbCommandConnection::open, |connection| {
+                    connection.device.write(&cmd)?;
+                    // Config(0xFFA0) 与 Audio(0xFFAA) 是同一个物理 HID 接口上的两个顶层集合，
+                    // macOS 按 path 打开拿到的是整条接口——板载音频一开，命令响应就淹没在
+                    // 每秒上百个 0xB1 音频包里。只读一个报告会把音频包当成响应，表现是
+                    // "响应无效"，而且录音期间任何命令都会偶发中招。按报告类型筛出真正的响应。
+                    let deadline = std::time::Instant::now() + Duration::from_millis(3000);
+                    let mut buf = [0u8; 64];
+                    let mut fallback: Option<(usize, [u8; 64])> = None;
+                    loop {
+                        let remaining =
+                            deadline.saturating_duration_since(std::time::Instant::now());
+                        if remaining.is_zero() {
+                            // 超时前没等到对得上的响应：把最后一个命令响应交回去，
+                            // 让上层解析器给出比"读超时"更具体的错误。
+                            return fallback.ok_or_else(|| anyhow::anyhow!("HID 命令响应读取超时"));
+                        }
+                        let len = connection
+                            .device
+                            .read_timeout(&mut buf, remaining.as_millis() as i32)?;
+                        if len == 0 {
+                            continue;
+                        }
+                        match classify_command_report(&buf[..len], cmd[1]) {
+                            CommandReportKind::Match => return Ok((len, buf)),
+                            // 是命令响应，但不是这条命令的（异步上报等）：留作超时兜底。
+                            CommandReportKind::OtherCommand => fallback = Some((len, buf)),
+                            CommandReportKind::NotCommand => {}
+                        }
+                    }
+                });
+            // DFU enter 会立刻让设备切 PID；无论有没有读到响应，都不能把旧 handle
+            // 留给下一条普通命令。普通 IO 错误已由 with_connection 自动失效。
+            if invalidate_after {
+                cache.invalidate();
             }
+            transaction
         });
         let res = result
             .await
@@ -1625,7 +1636,101 @@ fn capability_query_matches_current_connection(
 // 命令交互辅助(USB only)
 // ================================================================
 
-/// RAII 暂停 Monitor 读取,让出接口给命令交互(USB fresh 命令也要暂停,防 monitor 吃响应)。
+/// 同一物理 USB 连接代次内复用一条独立命令连接。
+///
+/// `with_connection` 不重放失败的 transaction：IO 失败只让当前连接失效，下一条
+/// 上层命令才会重新打开。调用方需在整条 write/read transaction 外持有此 cache 的锁，
+/// 防止并发命令交叉消费响应。
+#[cfg(feature = "usb")]
+struct ReusableCommandConnection<C> {
+    epoch: Option<u64>,
+    connection: Option<C>,
+}
+
+#[cfg(feature = "usb")]
+impl<C> Default for ReusableCommandConnection<C> {
+    fn default() -> Self {
+        Self {
+            epoch: None,
+            connection: None,
+        }
+    }
+}
+
+#[cfg(feature = "usb")]
+impl<C> ReusableCommandConnection<C> {
+    fn with_connection<R, E>(
+        &mut self,
+        epoch: u64,
+        open: impl FnOnce() -> std::result::Result<C, E>,
+        transaction: impl FnOnce(&C) -> std::result::Result<R, E>,
+    ) -> std::result::Result<R, E> {
+        if self.epoch != Some(epoch) || self.connection.is_none() {
+            self.invalidate();
+            let connection = open()?;
+            self.epoch = Some(epoch);
+            self.connection = Some(connection);
+        }
+
+        let result = transaction(
+            self.connection
+                .as_ref()
+                .expect("connection is populated immediately before the transaction"),
+        );
+        if result.is_err() {
+            self.invalidate();
+        }
+        result
+    }
+
+    fn invalidate(&mut self) {
+        self.connection = None;
+        self.epoch = None;
+    }
+}
+
+/// 命令连接独占自己的 HidApi 和 HidDevice，绝不复用 monitor 的 handle。
+///
+/// 字段顺序有意让 `device` 先于 `_api` drop，避免 HidApi 先释放底层上下文。
+#[cfg(feature = "usb")]
+struct UsbCommandConnection {
+    device: hidapi::HidDevice,
+    _api: hidapi::HidApi,
+}
+
+#[cfg(feature = "usb")]
+impl UsbCommandConnection {
+    fn open() -> Result<Self> {
+        let api = hidapi::HidApi::new()?;
+        let device = {
+            let dev_info = api
+                .device_list()
+                .find(|device| {
+                    device.vendor_id() == VID
+                        && is_target_pid(device.product_id())
+                        && device.usage_page() == USAGE_PAGE_CONFIG
+                        && device.usage() == 0x0002
+                })
+                .or_else(|| {
+                    api.device_list().find(|device| {
+                        device.vendor_id() == VID
+                            && is_target_pid(device.product_id())
+                            && device.usage_page() == USAGE_PAGE_CONFIG
+                    })
+                })
+                .ok_or_else(|| anyhow::anyhow!("未找到 Config 接口"))?;
+            api.open_path(dev_info.path())?
+        };
+        Ok(Self { device, _api: api })
+    }
+}
+
+#[cfg(feature = "usb")]
+fn should_invalidate_usb_command_after(cmd: &[u8; 64]) -> bool {
+    cmd[1] == crate::dfu::CMD_ENTER_HID_DFU_MODE
+}
+
+/// RAII 暂停 Monitor 读取,让出接口给命令交互(独立 USB 命令连接也要暂停,防 monitor 吃响应)。
 /// 在 spawn_blocking 线程内使用,sleep(20ms) 不阻塞 async runtime。
 #[cfg(feature = "usb")]
 struct PauseGuard {
@@ -1703,7 +1808,7 @@ impl DeviceBlobLink<'_> {
             ConnectionType::Usb => {
                 let (len, buf) = self
                     .core
-                    .cmd_via_fresh_usb(*request)
+                    .cmd_via_usb(*request)
                     .await
                     .map_err(|e| e.to_string())?;
                 if len == 0 {
@@ -1903,5 +2008,223 @@ mod audio_capability_cache_tests {
             core.audio_capability_state(),
             AudioCapabilityState::Unqueried
         );
+    }
+}
+
+#[cfg(all(test, feature = "usb"))]
+mod usb_command_connection_reuse_tests {
+    use super::*;
+    use std::sync::atomic::{AtomicUsize, Ordering as AtomicOrdering};
+    use std::sync::{Arc, Mutex};
+    use std::thread;
+
+    #[derive(Debug)]
+    struct FakeConnection {
+        id: usize,
+        drops: Arc<AtomicUsize>,
+    }
+
+    impl Drop for FakeConnection {
+        fn drop(&mut self) {
+            self.drops.fetch_add(1, AtomicOrdering::SeqCst);
+        }
+    }
+
+    #[test]
+    fn repeated_commands_in_one_usb_epoch_open_once() {
+        let opens = AtomicUsize::new(0);
+        let drops = Arc::new(AtomicUsize::new(0));
+        let mut cache = ReusableCommandConnection::default();
+
+        for _ in 0..20 {
+            let id = cache
+                .with_connection(
+                    7,
+                    || {
+                        let id = opens.fetch_add(1, AtomicOrdering::SeqCst) + 1;
+                        Ok::<_, &'static str>(FakeConnection {
+                            id,
+                            drops: drops.clone(),
+                        })
+                    },
+                    |connection| Ok::<_, &'static str>(connection.id),
+                )
+                .unwrap();
+            assert_eq!(id, 1);
+        }
+
+        assert_eq!(opens.load(AtomicOrdering::SeqCst), 1);
+        assert_eq!(drops.load(AtomicOrdering::SeqCst), 0);
+    }
+
+    #[test]
+    fn connection_epoch_change_drops_old_handle_and_opens_once_for_new_epoch() {
+        let opens = AtomicUsize::new(0);
+        let drops = Arc::new(AtomicUsize::new(0));
+        let mut cache = ReusableCommandConnection::default();
+
+        for epoch in [10, 10, 11, 11] {
+            cache
+                .with_connection(
+                    epoch,
+                    || {
+                        let id = opens.fetch_add(1, AtomicOrdering::SeqCst) + 1;
+                        Ok::<_, &'static str>(FakeConnection {
+                            id,
+                            drops: drops.clone(),
+                        })
+                    },
+                    |_| Ok::<_, &'static str>(()),
+                )
+                .unwrap();
+        }
+
+        assert_eq!(opens.load(AtomicOrdering::SeqCst), 2);
+        assert_eq!(drops.load(AtomicOrdering::SeqCst), 1);
+    }
+
+    #[test]
+    fn io_failure_invalidates_handle_without_replaying_command() {
+        let opens = AtomicUsize::new(0);
+        let transactions = AtomicUsize::new(0);
+        let drops = Arc::new(AtomicUsize::new(0));
+        let mut cache = ReusableCommandConnection::default();
+
+        let error = cache.with_connection(
+            3,
+            || {
+                let id = opens.fetch_add(1, AtomicOrdering::SeqCst) + 1;
+                Ok::<_, &'static str>(FakeConnection {
+                    id,
+                    drops: drops.clone(),
+                })
+            },
+            |_| {
+                transactions.fetch_add(1, AtomicOrdering::SeqCst);
+                Err::<(), _>("read failed")
+            },
+        );
+        assert_eq!(error.unwrap_err(), "read failed");
+        assert_eq!(transactions.load(AtomicOrdering::SeqCst), 1);
+        assert_eq!(drops.load(AtomicOrdering::SeqCst), 1);
+
+        cache
+            .with_connection(
+                3,
+                || {
+                    let id = opens.fetch_add(1, AtomicOrdering::SeqCst) + 1;
+                    Ok::<_, &'static str>(FakeConnection {
+                        id,
+                        drops: drops.clone(),
+                    })
+                },
+                |_| {
+                    transactions.fetch_add(1, AtomicOrdering::SeqCst);
+                    Ok::<_, &'static str>(())
+                },
+            )
+            .unwrap();
+
+        assert_eq!(opens.load(AtomicOrdering::SeqCst), 2);
+        assert_eq!(transactions.load(AtomicOrdering::SeqCst), 2);
+    }
+
+    #[test]
+    fn failed_factory_does_not_cache_partial_connection() {
+        let attempts = AtomicUsize::new(0);
+        let drops = Arc::new(AtomicUsize::new(0));
+        let mut cache = ReusableCommandConnection::default();
+
+        let first = cache.with_connection(
+            4,
+            || {
+                attempts.fetch_add(1, AtomicOrdering::SeqCst);
+                Err::<FakeConnection, _>("open failed")
+            },
+            |_| Ok::<_, &'static str>(()),
+        );
+        assert_eq!(first.unwrap_err(), "open failed");
+
+        cache
+            .with_connection(
+                4,
+                || {
+                    attempts.fetch_add(1, AtomicOrdering::SeqCst);
+                    Ok::<_, &'static str>(FakeConnection {
+                        id: 2,
+                        drops: drops.clone(),
+                    })
+                },
+                |_| Ok::<_, &'static str>(()),
+            )
+            .unwrap();
+        assert_eq!(attempts.load(AtomicOrdering::SeqCst), 2);
+    }
+
+    #[test]
+    fn whole_transactions_remain_serialized_on_one_cached_handle() {
+        let cache = Arc::new(Mutex::new(ReusableCommandConnection::default()));
+        let order = Arc::new(Mutex::new(Vec::new()));
+        let (first_started_tx, first_started_rx) = std::sync::mpsc::channel();
+        let (release_first_tx, release_first_rx) = std::sync::mpsc::channel();
+
+        let first_cache = cache.clone();
+        let first_order = order.clone();
+        let first = thread::spawn(move || {
+            let mut cache = first_cache.lock().unwrap();
+            cache
+                .with_connection(
+                    1,
+                    || {
+                        Ok::<_, &'static str>(FakeConnection {
+                            id: 1,
+                            drops: Arc::new(AtomicUsize::new(0)),
+                        })
+                    },
+                    |_| {
+                        first_order.lock().unwrap().push("first:start");
+                        first_started_tx.send(()).unwrap();
+                        release_first_rx.recv().unwrap();
+                        first_order.lock().unwrap().push("first:end");
+                        Ok::<_, &'static str>(0x13u8)
+                    },
+                )
+                .unwrap()
+        });
+
+        first_started_rx.recv().unwrap();
+        let second_cache = cache.clone();
+        let second_order = order.clone();
+        let second = thread::spawn(move || {
+            let mut cache = second_cache.lock().unwrap();
+            cache
+                .with_connection(
+                    1,
+                    || panic!("second transaction must reuse the first connection"),
+                    |_| {
+                        second_order.lock().unwrap().push("second:start");
+                        second_order.lock().unwrap().push("second:end");
+                        Ok::<_, &'static str>(0x15u8)
+                    },
+                )
+                .unwrap()
+        });
+
+        release_first_tx.send(()).unwrap();
+        assert_eq!(first.join().unwrap(), 0x13);
+        assert_eq!(second.join().unwrap(), 0x15);
+        assert_eq!(
+            *order.lock().unwrap(),
+            ["first:start", "first:end", "second:start", "second:end"]
+        );
+    }
+
+    #[test]
+    fn dfu_enter_requires_command_connection_invalidation() {
+        let packet = crate::dfu::build_enter_dfu_hid_command();
+        assert!(should_invalidate_usb_command_after(&packet));
+        assert!(!should_invalidate_usb_command_after(
+            &HidPacket::get_device_info()
+        ));
     }
 }
