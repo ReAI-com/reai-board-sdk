@@ -14,7 +14,7 @@ use std::time::{Duration, Instant};
 use tokio::sync::broadcast;
 
 use super::device_manager::DeviceConnection;
-use crate::kernel::consumer_hold::ConsumerHeldTracker;
+use crate::kernel::consumer_hold::{ConsumerHeldTracker, ConsumerModeTracker};
 use crate::kernel::event::{AiVoiceKeyEvent, BoardEvent, KeySource, ModeChangeEvent, ModeSource};
 use crate::kernel::key_aggregator::{KeyStateAggregator, PressedKeyMeta};
 use crate::kernel::protocol_hid::*;
@@ -310,6 +310,7 @@ impl HidMonitor {
         const MAX_ERRORS: u32 = 5;
 
         let mut tracker = ConsumerHeldTracker::default();
+        let mut mode_tracker = ConsumerModeTracker::default();
 
         while running.load(Ordering::SeqCst) {
             let mut buf = [0u8; 64];
@@ -329,6 +330,7 @@ impl HidMonitor {
                     }
 
                     let frame = tracker.on_frame(key_value, Instant::now());
+                    let mode_change = mode_tracker.on_frame(key_value, frame.cleared);
                     if frame.counts_as_key_event {
                         stats.key_event_count.fetch_add(1, Ordering::SeqCst);
                     }
@@ -340,20 +342,9 @@ impl HidMonitor {
                         emit_ai_voice(&event_tx, false);
                     }
 
-                    // 部分固件通过 Consumer usage 上报模式键，而不是
-                    // Config 接口的 CMD_STATUS/0xC9。两条路径统一产生
-                    // ModeChange；若随后收到状态帧，会以状态帧为最终值。
-                    if let Some((mode_value, mode_name)) =
-                        find_key_index_by_value(key_value).and_then(key_index_to_mode)
-                    {
-                        log::info!(
-                            target: "hid",
-                            "USB 模式切换 (Consumer): {} (0x{:02X})",
-                            mode_name,
-                            mode_value
-                        );
-                        emit_mode_dial(&event_tx, mode_name, mode_value);
-                    }
+                    // USB and BLE share ConsumerModeTracker: endpoint presses
+                    // select YOLO/PLAN and releasing an endpoint selects CHAT.
+                    emit_consumer_mode(&event_tx, mode_change);
                 }
                 Ok(_) => {}
                 Err(e) => {
@@ -500,6 +491,18 @@ fn emit_mode_dial(tx: &broadcast::Sender<BoardEvent>, mode: &str, value: u8) {
     }));
 }
 
+fn emit_consumer_mode(tx: &broadcast::Sender<BoardEvent>, mode_change: Option<(u8, &'static str)>) {
+    if let Some((mode_value, mode_name)) = mode_change {
+        log::info!(
+            target: "hid",
+            "USB 模式切换 (Consumer): {} (0x{:02X})",
+            mode_name,
+            mode_value
+        );
+        emit_mode_dial(tx, mode_name, mode_value);
+    }
+}
+
 // 注:`find_key_index_by_value` / `key_index_to_mode` 已挪到 `kernel::protocol_hid`,
 // 与 BLE GATT client 共用(本模块通过 `use crate::kernel::protocol_hid::*` 引入)。
 
@@ -510,6 +513,30 @@ mod tests {
     #[test]
     fn test_parse_key_mask_empty() {
         assert!(HidMonitor::parse_key_mask(0x00).is_empty());
+    }
+
+    #[test]
+    fn usb_consumer_endpoint_press_and_release_emit_yolo_then_chat() {
+        let (tx, mut rx) = broadcast::channel(4);
+        let mut tracker = ConsumerModeTracker::default();
+
+        emit_consumer_mode(&tx, tracker.on_frame(0x0F0A, false));
+        match rx.try_recv().expect("YOLO mode") {
+            BoardEvent::ModeChange(mode) => {
+                assert_eq!(mode.mode, "YOLO");
+                assert_eq!(mode.mode_value, 1);
+            }
+            other => panic!("unexpected event: {other:?}"),
+        }
+
+        emit_consumer_mode(&tx, tracker.on_frame(0x0000, true));
+        match rx.try_recv().expect("CHAT mode") {
+            BoardEvent::ModeChange(mode) => {
+                assert_eq!(mode.mode, "CHAT");
+                assert_eq!(mode.mode_value, 0);
+            }
+            other => panic!("unexpected event: {other:?}"),
+        }
     }
 
     #[test]

@@ -7,6 +7,15 @@ follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Fixed
 
+- USB and BLE now share one Consumer mode-switch tracker. Endpoint usages
+  `0x0F0A` / `0x0F0B` select YOLO / PLAN, while releasing the active endpoint
+  selects the contactless middle CHAT position. Both transports emit the same
+  `BoardEvent::ModeChange(ModeSource::Dial)` contract.
+- Removed transport-specific mode inference and avoided continuous BLE work-mode
+  polling. BLE keeps one best-effort connection initialization query; subsequent
+  lever changes are driven by firmware events and do not occupy the GATT command
+  channel or interfere with audio heartbeats.
+- Added shared-state, USB, and BLE endpoint press/release regression coverage.
 - USB commands now reuse one command-only HID connection for the lifetime of a
   physical USB connection instead of opening and closing `HidApi` / `HidDevice`
   for every heartbeat. The command handle remains separate from the config
