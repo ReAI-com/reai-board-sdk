@@ -25,8 +25,14 @@ abstract interface class BoardBleTransport {
 
   Stream<BoardNotification> get notificationStream;
 
+  /// 当前一次扫描的增量快照。每发现或更新设备时立即推送，不等待扫描超时。
+  Stream<List<BleDeviceInfo>> get scanResults;
+
   /// 当前 ATT MTU 可承载的 GATT 数据长度，写命令和通知都受此上限约束。
   int get maxGattPayload;
+
+  /// GATT 有效载荷变化流；iOS 会在连接后自动协商 MTU，因此不能只读取初始值。
+  Stream<int> get maxGattPayloads;
 
   Future<List<BleDeviceInfo>> scan({Duration? timeout});
 

@@ -4,6 +4,8 @@ import 'dart:ui';
 import 'package:flutter/material.dart';
 import 'package:reai_board_sdk/reai_board_sdk.dart';
 
+const exampleBuildLabel = '1.0.0 (2)';
+
 void main() {
   FlutterError.onError = (details) {
     FlutterError.presentError(details);
@@ -76,8 +78,11 @@ class _BoardSdkPageState extends State<BoardSdkPage> {
   List<BleDeviceInfo> _devices = const [];
   StreamSubscription<BoardEvent>? _eventSubscription;
   StreamSubscription<EncodedAudioFrame>? _audioSubscription;
+  StreamSubscription<List<BleDeviceInfo>>? _scanSubscription;
+  StreamSubscription<int>? _mtuSubscription;
   Timer? _heartbeat;
   bool _busy = false;
+  bool _scanning = false;
   bool _audioRunning = false;
   int _audioFrameCount = 0;
   int _audioGapCount = 0;
@@ -85,7 +90,7 @@ class _BoardSdkPageState extends State<BoardSdkPage> {
   @override
   void initState() {
     super.initState();
-    _log('页面启动，开始监听 SDK 事件');
+    _log('页面启动，测试包=$exampleBuildLabel，扫描流/MTU 动态协商修复版');
     unawaited(_board.start());
     _eventSubscription = _board.events.listen(
       (event) => _log(formatBoardEventForLog(event)),
@@ -111,25 +116,55 @@ class _BoardSdkPageState extends State<BoardSdkPage> {
         _logError('音频流异常', error, stackTrace);
       },
     );
+    _scanSubscription = _board.scanResults.listen(
+      (devices) {
+        if (!mounted) return;
+        final knownIds = _devices.map((device) => device.id).toSet();
+        final added = devices
+            .where((device) => !knownIds.contains(device.id))
+            .toList();
+        setState(() => _devices = devices);
+        for (final device in added) {
+          _log(
+            '扫描发现 name=${device.name} id=${device.id} '
+            'rssi=${device.rssi}dBm，立即显示',
+          );
+        }
+      },
+      onError: (Object error, StackTrace stackTrace) {
+        _logError('扫描结果流异常', error, stackTrace);
+      },
+    );
+    _mtuSubscription = _board.maxGattPayloads.listen(
+      (payload) => _log('GATT 有效载荷已更新为 $payload 字节'),
+      onError: (Object error, StackTrace stackTrace) {
+        _logError('MTU 变化流异常', error, stackTrace);
+      },
+    );
   }
 
   Future<void> _scan() async {
-    await _run(() async {
-      _log('扫描开始，timeout=10s，目标前缀=REAI_VB_');
-      final devices = await _board.scan();
-      setState(() => _devices = devices);
-      _log(
-        '扫描完成，发现 ${devices.length} 台设备：'
-        '${devices.map((device) => '${device.name}/${device.id}/${device.rssi}dBm').join(', ')}',
-      );
-    });
+    setState(() => _scanning = true);
+    try {
+      await _run(() async {
+        _log('扫描开始，timeout=10s，目标前缀=REAI_VB_');
+        final devices = await _board.scan();
+        if (mounted) setState(() => _devices = devices);
+        _log(
+          '扫描完成，发现 ${devices.length} 台设备：'
+          '${devices.map((device) => '${device.name}/${device.id}/${device.rssi}dBm').join(', ')}',
+        );
+      });
+    } finally {
+      if (mounted) setState(() => _scanning = false);
+    }
   }
 
   Future<void> _connect(BleDeviceInfo device) async {
     await _run(() async {
       _log('连接开始 name=${device.name} id=${device.id} rssi=${device.rssi}');
       await _board.connect(device);
-      _log('GATT ready，开始读取设备信息');
+      _log('GATT ready，payload=${_board.maxGattPayload}B，开始读取设备信息');
       final info = await _board.readDeviceInfo();
       _log(
         '已连接 ${device.name}，chip=${info.chipId}，'
@@ -235,19 +270,25 @@ class _BoardSdkPageState extends State<BoardSdkPage> {
     _heartbeat?.cancel();
     unawaited(_eventSubscription?.cancel());
     unawaited(_audioSubscription?.cancel());
+    unawaited(_scanSubscription?.cancel());
+    unawaited(_mtuSubscription?.cancel());
     unawaited(_board.shutdown());
     super.dispose();
   }
 
   @override
   Widget build(BuildContext context) => Scaffold(
-    appBar: AppBar(title: const Text('ReAI-Vibe-Board SDK')),
+    appBar: AppBar(title: const Text('ReAI Board SDK $exampleBuildLabel')),
     body: ListView(
       padding: const EdgeInsets.all(16),
       children: [
         FilledButton(
           onPressed: _busy ? null : _scan,
-          child: Text(_busy ? '处理中…' : '扫描 REAI_VB_ 设备'),
+          child: Text(
+            _scanning
+                ? '扫描中…已发现 ${_devices.length} 台'
+                : (_busy ? '处理中…' : '扫描 REAI_VB_ 设备'),
+          ),
         ),
         for (final device in _devices)
           ListTile(

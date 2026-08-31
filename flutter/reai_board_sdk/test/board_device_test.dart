@@ -31,8 +31,11 @@ class FakeBoardClock implements BoardClock {
 class FakeBoardTransport implements BoardBleTransport {
   final states = StreamController<BoardTransportState>.broadcast();
   final notifications = StreamController<BoardNotification>.broadcast();
+  final scanUpdates = StreamController<List<BleDeviceInfo>>.broadcast();
+  final payloadUpdates = StreamController<int>.broadcast();
   final writes = <List<int>>[];
   int payload = 244;
+  Completer<List<BleDeviceInfo>>? pendingScan;
   bool connected = false;
   int connectCalls = 0;
   final autoConnectValues = <bool>[];
@@ -47,9 +50,22 @@ class FakeBoardTransport implements BoardBleTransport {
   int get maxGattPayload => payload;
 
   @override
-  Future<List<BleDeviceInfo>> scan({Duration? timeout}) async => const [
-    BleDeviceInfo(id: 'board-1', name: 'REAI_VB_0729', rssi: -42),
-  ];
+  Stream<int> get maxGattPayloads => payloadUpdates.stream;
+
+  @override
+  Stream<List<BleDeviceInfo>> get scanResults => scanUpdates.stream;
+
+  @override
+  Future<List<BleDeviceInfo>> scan({Duration? timeout}) =>
+      pendingScan?.future ??
+      Future.value(const [
+        BleDeviceInfo(id: 'board-1', name: 'REAI_VB_0729', rssi: -42),
+      ]);
+
+  void updatePayload(int value) {
+    payload = value;
+    payloadUpdates.add(value);
+  }
 
   @override
   Future<void> connect(BleDeviceInfo device, {bool autoConnect = false}) async {
@@ -82,6 +98,8 @@ class FakeBoardTransport implements BoardBleTransport {
   Future<void> dispose() async {
     await states.close();
     await notifications.close();
+    await scanUpdates.close();
+    await payloadUpdates.close();
   }
 }
 
@@ -131,6 +149,25 @@ void main() {
     expect(await second, isTrue);
   });
 
+  test('扫描 Future 未完成时已能收到逐步设备列表', () async {
+    transport.pendingScan = Completer<List<BleDeviceInfo>>();
+    final updates = <List<BleDeviceInfo>>[];
+    final subscription = device.scanResults.listen(updates.add);
+
+    final scan = device.scan();
+    transport.scanUpdates.add(const [board]);
+    await flush();
+
+    expect(updates, [
+      const [board],
+    ]);
+    expect(transport.pendingScan!.isCompleted, isFalse);
+
+    transport.pendingScan!.complete(const [board]);
+    expect(await scan, const [board]);
+    await subscription.cancel();
+  });
+
   test('pending 0x12 优先作为响应，不重复发模式推送', () async {
     final events = <BoardEvent>[];
     final sub = device.events.listen(events.add);
@@ -155,18 +192,58 @@ void main() {
     expect(await second, isFalse);
   });
 
-  test('低 MTU 不阻断输入事件，但受限命令给出 typed error', () async {
+  test('低 MTU 不阻断输入事件，协商超时后受限命令给出 typed error', () async {
     transport.payload = 20;
     final events = <BoardEvent>[];
     final sub = device.events.listen(events.add);
     transport.event([0x0C, 0x02, 0x01, 0x0F]);
     await flush();
     expect(events.whereType<KeyPressEvent>().single.keyIndex, 3);
-    await expectLater(
-      device.readDeviceInfo(),
-      throwsA(isA<BoardMtuException>()),
-    );
+    final read = device.readDeviceInfo();
+    await flush();
+    clock.advance(const Duration(seconds: 5));
+    await expectLater(read, throwsA(isA<BoardMtuException>()));
     await sub.cancel();
+  });
+
+  test('启动音频会等待 iOS MTU 协商更新，而不是立即报 20 字节', () async {
+    final capabilities = device.queryAudioCapabilities();
+    await flush();
+    transport.event([
+      0x6E,
+      13,
+      0,
+      1,
+      15,
+      0,
+      0,
+      0,
+      1,
+      57,
+      57,
+      0x88,
+      0x13,
+      0x88,
+      0x13,
+    ]);
+    await capabilities;
+    transport.updatePayload(20);
+    final writesBeforeStart = transport.writes.length;
+
+    final start = device.controlAudioStream(
+      action: AudioStreamAction.start,
+      scope: AudioStreamScope.session,
+      leaseId: 0x12345678,
+      ttlMs: 5000,
+    );
+    await flush();
+    expect(transport.writes, hasLength(writesBeforeStart));
+
+    transport.updatePayload(182);
+    await flush();
+    expect(transport.writes, hasLength(writesBeforeStart + 1));
+    transport.event([0x6F, 10, 0, 1, 2, 1, 0x78, 0x56, 0x34, 0x12, 0x88, 0x13]);
+    await start;
   });
 
   test('断连时 pending 失败且 capability 回到 unqueried', () async {

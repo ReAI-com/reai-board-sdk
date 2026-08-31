@@ -263,6 +263,7 @@ final class EncodedAudioFrame {
 final class BoardConfig {
   const BoardConfig({
     this.commandTimeout = const Duration(seconds: 5),
+    this.mtuNegotiationTimeout = const Duration(seconds: 5),
     this.notificationSettleDelay = const Duration(milliseconds: 500),
     this.scanTimeout = const Duration(seconds: 10),
     this.autoReconnect = true,
@@ -270,6 +271,7 @@ final class BoardConfig {
   });
 
   final Duration commandTimeout;
+  final Duration mtuNegotiationTimeout;
   final Duration notificationSettleDelay;
   final Duration scanTimeout;
   final bool autoReconnect;

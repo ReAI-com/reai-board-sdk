@@ -33,6 +33,9 @@ final board = BoardDevice(
 );
 await board.start();
 
+// 扫描过程中每发现或更新一台设备就会推送快照，不用等 10 秒超时。
+board.scanResults.listen((devices) => print('found=${devices.length}'));
+
 board.events.listen((event) {
   switch (event) {
     case KeyPressEvent():
@@ -53,6 +56,7 @@ print('${info.chipId} ${info.firmwareVersion} ${info.batteryLevel}%');
 `BoardDevice` 负责：
 
 - 扫描 `REAI_VB_` 广播名、连接、断开与已知 peripheral id 重连；
+- `scanResults` 逐步推送扫描快照，`scan()` 同时保留最终列表返回值；
 - FE61 串行命令，FE62 响应/异步事件分流，FE63 音频帧；
 - `readDeviceInfo`、按键配置、模式、静默录音、休眠、App online、URL；
 - 音频 capability 三态、lease start/heartbeat/stop、sequence gap；
@@ -97,6 +101,10 @@ await board.controlAudioStream(
 );
 // 调用方需在 TTL 到期前发送 heartbeat，并在结束时 stop。
 ```
+
+iOS 连接刚建立时可能先报 ATT MTU 23（有效载荷 20 字节），系统会继续自动协商。
+SDK 持续订阅 MTU 变化；受 MTU 限制的设备信息、按键配置和版本化音频操作会先等待
+`BoardConfig.mtuNegotiationTimeout`，只有协商后仍不足才抛出 `BoardMtuException`。
 
 ## 权限
 

@@ -55,6 +55,13 @@ final class BoardDevice {
 
   Stream<EncodedAudioFrame> get audioFrames => _audioFrames.stream;
 
+  /// 扫描中的设备列表快照；UI 可据此边扫描边展示。
+  Stream<List<BleDeviceInfo>> get scanResults => _transport.scanResults;
+
+  int get maxGattPayload => _transport.maxGattPayload;
+
+  Stream<int> get maxGattPayloads => _transport.maxGattPayloads;
+
   bool get isConnected => _connected;
 
   int get connectionEpoch => _connectionEpoch;
@@ -254,7 +261,7 @@ final class BoardDevice {
     required int ttlMs,
   }) async {
     if (action != AudioStreamAction.stop) {
-      _requirePayload(BoardGatt.versionedAudioGattBytes);
+      await _requirePayload(BoardGatt.versionedAudioGattBytes);
       final capabilityState = _audioCapabilityState;
       if (capabilityState is! AudioCapabilityReady ||
           !capabilityState.capabilities.supportsBleGatt) {
@@ -288,7 +295,7 @@ final class BoardDevice {
   /// 旧固件逃生口：只开放 session 原始音频，不声明 capability 或 timeline 支持。
   void startLegacySessionAudio() {
     if (!_connected) throw const BoardDisconnectedException();
-    _requirePayload(59);
+    _requirePayloadNow(59);
     _openAudioRoute(legacy: true);
   }
 
@@ -305,7 +312,7 @@ final class BoardDevice {
     final result = Completer<T>();
     final scheduled = _commandTail.then((_) async {
       try {
-        if (requiredPayload != null) _requirePayload(requiredPayload);
+        if (requiredPayload != null) await _requirePayload(requiredPayload);
         final response = await _executeCommand(bytes, expectedCommand);
         result.complete(parser(response));
       } catch (error, stackTrace) {
@@ -336,7 +343,42 @@ final class BoardDevice {
     }
   }
 
-  void _requirePayload(int requiredBytes) {
+  Future<void> _requirePayload(int requiredBytes) async {
+    if (!_connected) throw const BoardDisconnectedException();
+    if (_transport.maxGattPayload >= requiredBytes) return;
+
+    final result = Completer<void>();
+    late final StreamSubscription<int> payloadSubscription;
+    late final StreamSubscription<BoardTransportState> stateSubscription;
+    payloadSubscription = _transport.maxGattPayloads.listen((payload) {
+      if (payload >= requiredBytes && !result.isCompleted) result.complete();
+    });
+    stateSubscription = _transport.connectionStates.listen((state) {
+      if (state == BoardTransportState.disconnected && !result.isCompleted) {
+        result.completeError(const BoardDisconnectedException());
+      }
+    });
+    unawaited(
+      _clock.delay(_config.mtuNegotiationTimeout).then((_) {
+        if (!result.isCompleted) {
+          result.completeError(
+            BoardMtuException(
+              requiredBytes: requiredBytes,
+              actualBytes: _transport.maxGattPayload,
+            ),
+          );
+        }
+      }),
+    );
+    try {
+      await result.future;
+    } finally {
+      await payloadSubscription.cancel();
+      await stateSubscription.cancel();
+    }
+  }
+
+  void _requirePayloadNow(int requiredBytes) {
     final actual = _transport.maxGattPayload;
     if (actual < requiredBytes) {
       throw BoardMtuException(
