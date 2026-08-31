@@ -115,6 +115,35 @@ async fn main() -> anyhow::Result<()> {
 
 ---
 
+## Flutter / iOS / Android
+
+Mobile apps must not embed the desktop `btleplug` / `hidapi` runtime. This
+repository now includes [`flutter/reai_board_sdk`](flutter/reai_board_sdk), a
+Flutter BLE package that keeps the same typed command, event, reconnect and
+board-audio lease semantics while using `flutter_blue_plus` for CoreBluetooth
+and Android GATT.
+
+```yaml
+dependencies:
+  reai_board_sdk:
+    git:
+      url: https://github.com/ReAI-com/reai-board-sdk.git
+      path: flutter/reai_board_sdk
+```
+
+The mobile package supports FE60–FE63 scanning/connection, device info, key
+configuration, key/knob/mode events, common settings, audio capability/lease
+control, and raw versioned or legacy mSBC frames. USB, DFU, factory commands,
+and bindings-blob transfer are not presented as mobile capabilities.
+
+The Flutter package deliberately does **not** bundle the LGPL mSBC decoder into
+the MIT mobile library. It exposes encoded frames and continuity metadata for a
+Host-selected decoder. See the [Flutter README](flutter/reai_board_sdk/README.md)
+for permissions, background reconnect limits, API parity, and the real-device
+checklist. Shared Rust/Dart golden vectors prevent protocol byte drift.
+
+---
+
 ## Supported platforms
 
 | OS      | Status | Notes                                                          |
@@ -122,10 +151,13 @@ async fn main() -> anyhow::Result<()> {
 | macOS   | Verified in CI | `hidapi` uses `macos-shared-device`                    |
 | Linux   | Builds in CI   | Needs `libdbus-1-dev libudev-dev libasound2-dev pkg-config`; `udev` rules may be needed for raw HID |
 | Windows | Expected to work, **not yet verified** | WinUSB / Zadig driver for raw HID access |
+| iOS     | Flutter CI verified; hardware pending | Flutter package, CoreBluetooth BLE only |
+| Android | Flutter CI verified; hardware pending | Flutter package, Android GATT only |
 
-All three transports (USB HID, USB Audio, BLE GATT) are implemented for every
-platform above — the difference is only how much of it CI proves. Windows has
-no CI job yet; treat it as untested rather than unsupported.
+The three desktop transports (USB HID, USB Audio, BLE GATT) apply to macOS,
+Linux and Windows. iOS and Android use the separate Flutter BLE package and do
+not expose USB. Windows and mobile hardware have no real-device CI yet; treat
+them as automated-build coverage, not physical acceptance.
 
 `ble` uses `btleplug` 0.12 (native async). First `start()` may take ~40 s on
 macOS while CoreBluetooth warms up its adapter — this is the OS, not the SDK.

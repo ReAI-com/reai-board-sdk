@@ -11,6 +11,41 @@ env:
   RUSTFLAGS: -D warnings
 
 jobs:
+  flutter:
+    name: Flutter mobile SDK
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Install Flutter stable
+        uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+          cache: true
+
+      - name: Resolve Flutter SDK dependencies
+        working-directory: flutter/reai_board_sdk
+        run: flutter pub get
+
+      - name: Check Dart formatting
+        working-directory: flutter/reai_board_sdk
+        run: dart format --output=none --set-exit-if-changed lib test example/lib example/test
+
+      - name: Analyze Flutter SDK
+        working-directory: flutter/reai_board_sdk
+        run: flutter analyze
+
+      - name: Test Flutter SDK
+        working-directory: flutter/reai_board_sdk
+        run: flutter test
+
+      - name: Resolve and analyze example
+        working-directory: flutter/reai_board_sdk/example
+        run: |
+          flutter pub get
+          flutter analyze
+          flutter test
+
   check:
     name: check (${{ matrix.os }}, ${{ matrix.toolchain }})
     runs-on: ${{ matrix.os }}

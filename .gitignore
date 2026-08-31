@@ -35,3 +35,9 @@ GEMINI.md
 .aider*
 .github/copilot-instructions.md
 .worktree/
+
+# Flutter SDK library outputs（example 使用自身 flutter create 生成的 .gitignore）
+/flutter/reai_board_sdk/.dart_tool/
+/flutter/reai_board_sdk/build/
+/flutter/reai_board_sdk/.flutter-plugins*
+/flutter/reai_board_sdk/pubspec.lock

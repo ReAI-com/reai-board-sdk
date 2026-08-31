@@ -1,0 +1,20 @@
+name: reai_board_sdk
+description: ReAI-Vibe-Board Flutter BLE SDK for iOS and Android.
+version: 0.1.0
+repository: https://github.com/ReAI-com/reai-board-sdk
+
+environment:
+  sdk: ">=3.9.0 <4.0.0"
+  flutter: ">=3.32.0"
+
+dependencies:
+  flutter:
+    sdk: flutter
+  flutter_blue_plus: ">=1.35.2 <1.40.0"
+
+dev_dependencies:
+  flutter_test:
+    sdk: flutter
+  flutter_lints: ^6.0.0
+
+flutter:
