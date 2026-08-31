@@ -59,6 +59,8 @@ print('${info.chipId} ${info.firmwareVersion} ${info.batteryLevel}%');
 - `scanResults` 逐步推送扫描快照，`scan()` 同时保留最终列表返回值；
 - FE61 串行命令，FE62 响应/异步事件分流，FE63 音频帧；
 - `readDeviceInfo`、按键配置、模式、静默录音、休眠、App online、URL；
+- `KeyConfig.bindings` 解析 20 个三字节槽位，`activeBindings` 暴露 12 个实体键；
+- `BoardPhysicalKey`、`KeyBinding.description` 和 `copyWithActiveBinding` 支持移动端安全展示、局部合并；
 - 音频 capability 三态、lease start/heartbeat/stop、sequence gap；
 - 断连补发按键和 AI 语音键释放，避免上层出现“按住不放”。
 
@@ -80,6 +82,10 @@ print('${info.chipId} ${info.firmwareVersion} ${info.batteryLevel}%');
 
 Rust 和 Dart 共读 `tests/fixtures/flutter_protocol_vectors.json`。fixture 不存在会直接测试失败，
 避免两套协议在重构时静默漂移。
+
+`example/` 是手机真机验收台：增量扫描、设备/MTU 状态、12 键实时高亮与计数、
+按键配置读取/标脏/确认写入/回读验证、模式拨杆、音频 lease/连续帧和可导出的系统日志。
+写入前会重读设备最新配置，只覆盖用户修改过的有效槽位，未知 Class 和桌面脚本绑定保持原样。
 
 ## 音频边界
 

@@ -2,9 +2,14 @@ import 'dart:async';
 import 'dart:ui';
 
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:reai_board_sdk/reai_board_sdk.dart';
 
-const exampleBuildLabel = '1.0.0 (2)';
+import 'dashboard_widgets.dart';
+
+export 'dashboard_widgets.dart' show HardwareInputPanel;
+
+const exampleBuildLabel = '1.0.0 (3)';
 
 void main() {
   FlutterError.onError = (details) {
@@ -55,8 +60,16 @@ class BoardSdkExampleApp extends StatelessWidget {
   @override
   Widget build(BuildContext context) => MaterialApp(
     title: 'ReAI Board SDK',
+    debugShowCheckedModeBanner: false,
     theme: ThemeData(
-      colorScheme: ColorScheme.fromSeed(seedColor: Colors.indigo),
+      useMaterial3: true,
+      colorScheme: ColorScheme.fromSeed(seedColor: const Color(0xFF5968E8)),
+      scaffoldBackgroundColor: const Color(0xFFF6F7FB),
+      cardTheme: const CardThemeData(
+        margin: EdgeInsets.zero,
+        elevation: 0,
+        color: Colors.white,
+      ),
     ),
     home: const BoardSdkPage(),
   );
@@ -75,25 +88,35 @@ class _BoardSdkPageState extends State<BoardSdkPage> {
     transport: FlutterBluePlusBoardTransport(),
   );
   final List<String> _logs = [];
+  final Set<int> _pressedKeys = {};
+  final Set<int> _dirtyKeys = {};
+  final Map<int, int> _eventCounts = {};
   List<BleDeviceInfo> _devices = const [];
   StreamSubscription<BoardEvent>? _eventSubscription;
   StreamSubscription<EncodedAudioFrame>? _audioSubscription;
   StreamSubscription<List<BleDeviceInfo>>? _scanSubscription;
   StreamSubscription<int>? _mtuSubscription;
   Timer? _heartbeat;
+  BleDeviceInfo? _connectedDevice;
+  DeviceInfo? _deviceInfo;
+  KeyConfig? _keyConfig;
+  WorkMode? _selectedMode;
+  int _selectedKeyIndex = 0;
+  String _lastEvent = '连接设备后，按实体键开始验收';
   bool _busy = false;
   bool _scanning = false;
   bool _audioRunning = false;
+  int _maxGattPayload = 20;
   int _audioFrameCount = 0;
   int _audioGapCount = 0;
 
   @override
   void initState() {
     super.initState();
-    _log('页面启动，测试包=$exampleBuildLabel，扫描流/MTU 动态协商修复版');
+    _log('页面启动，测试包=$exampleBuildLabel，12 键/配置/音频验收台');
     unawaited(_board.start());
     _eventSubscription = _board.events.listen(
-      (event) => _log(formatBoardEventForLog(event)),
+      _handleBoardEvent,
       onError: (Object error, StackTrace stackTrace) {
         _logError('事件流异常', error, stackTrace);
       },
@@ -105,6 +128,7 @@ class _BoardSdkPageState extends State<BoardSdkPage> {
         if (_audioFrameCount == 1 ||
             _audioFrameCount % 50 == 0 ||
             frame.discontinuity) {
+          if (mounted) setState(() {});
           _log(
             'mSBC frames=$_audioFrameCount payload=${frame.payload.length}B '
             'seq=${frame.sequence} total_gap=$_audioGapCount '
@@ -120,11 +144,10 @@ class _BoardSdkPageState extends State<BoardSdkPage> {
       (devices) {
         if (!mounted) return;
         final knownIds = _devices.map((device) => device.id).toSet();
-        final added = devices
-            .where((device) => !knownIds.contains(device.id))
-            .toList();
         setState(() => _devices = devices);
-        for (final device in added) {
+        for (final device in devices.where(
+          (device) => !knownIds.contains(device.id),
+        )) {
           _log(
             '扫描发现 name=${device.name} id=${device.id} '
             'rssi=${device.rssi}dBm，立即显示',
@@ -136,24 +159,70 @@ class _BoardSdkPageState extends State<BoardSdkPage> {
       },
     );
     _mtuSubscription = _board.maxGattPayloads.listen(
-      (payload) => _log('GATT 有效载荷已更新为 $payload 字节'),
+      (payload) {
+        if (mounted) setState(() => _maxGattPayload = payload);
+        _log('GATT 有效载荷已更新为 $payload 字节');
+      },
       onError: (Object error, StackTrace stackTrace) {
         _logError('MTU 变化流异常', error, stackTrace);
       },
     );
   }
 
+  void _handleBoardEvent(BoardEvent event) {
+    if (mounted) {
+      setState(() {
+        switch (event) {
+          case ConnectionEvent(:final connected):
+            if (!connected) {
+              _connectedDevice = null;
+              _deviceInfo = null;
+              _keyConfig = null;
+              _pressedKeys.clear();
+              _dirtyKeys.clear();
+              _audioRunning = false;
+            }
+          case KeyPressEvent(:final keyIndex, :final pressed):
+            if (pressed) {
+              _pressedKeys.add(keyIndex);
+              if (keyIndex >= 0 && keyIndex < KeyConfig.activeKeyCount) {
+                _selectedKeyIndex = keyIndex;
+              }
+              _eventCounts.update(
+                keyIndex,
+                (value) => value + 1,
+                ifAbsent: () => 1,
+              );
+            } else {
+              _pressedKeys.remove(keyIndex);
+            }
+            final key =
+                keyIndex >= 0 && keyIndex < BoardPhysicalKey.values.length
+                ? BoardPhysicalKey.values[keyIndex].name
+                : 'KEY$keyIndex';
+            _lastEvent = '$key ${pressed ? '按下' : '释放'}';
+          case ModeChangeEvent(:final mode):
+            _selectedMode = mode;
+            _lastEvent = '模式切换为 ${mode.label}';
+          case DeviceInfoEvent(:final info):
+            _deviceInfo = info;
+          default:
+            break;
+        }
+      });
+    }
+    _log(formatBoardEventForLog(event));
+  }
+
   Future<void> _scan() async {
+    HapticFeedback.lightImpact();
     setState(() => _scanning = true);
     try {
       await _run(() async {
         _log('扫描开始，timeout=10s，目标前缀=REAI_VB_');
         final devices = await _board.scan();
         if (mounted) setState(() => _devices = devices);
-        _log(
-          '扫描完成，发现 ${devices.length} 台设备：'
-          '${devices.map((device) => '${device.name}/${device.id}/${device.rssi}dBm').join(', ')}',
-        );
+        _log('扫描完成，发现 ${devices.length} 台设备');
       });
     } finally {
       if (mounted) setState(() => _scanning = false);
@@ -161,19 +230,173 @@ class _BoardSdkPageState extends State<BoardSdkPage> {
   }
 
   Future<void> _connect(BleDeviceInfo device) async {
+    HapticFeedback.mediumImpact();
     await _run(() async {
       _log('连接开始 name=${device.name} id=${device.id} rssi=${device.rssi}');
       await _board.connect(device);
-      _log('GATT ready，payload=${_board.maxGattPayload}B，开始读取设备信息');
+      if (mounted) {
+        setState(() {
+          _connectedDevice = device;
+          _maxGattPayload = _board.maxGattPayload;
+        });
+      }
+      _log('GATT ready，payload=${_board.maxGattPayload}B，开始读取设备状态');
       final info = await _board.readDeviceInfo();
+      final config = await _readKeyConfig();
+      final mode = await _board.getWorkMode();
+      if (mounted) {
+        setState(() {
+          _deviceInfo = info;
+          _keyConfig = config;
+          _selectedMode = mode;
+          _dirtyKeys.clear();
+        });
+      }
       _log(
         '已连接 ${device.name}，chip=${info.chipId}，'
-        'firmware=${info.firmwareVersion}，battery=${info.batteryLevel}%',
+        'firmware=${info.firmwareVersion}，battery=${info.batteryLevel}%，'
+        '按键配置=${config.activeBindings.length}项，mode=${mode.label}',
       );
     });
   }
 
+  Future<KeyConfig> _readKeyConfig() async {
+    _log('读取按键配置，期望响应 63B，当前 GATT payload=${_board.maxGattPayload}B');
+    final config = await _board.readKeyConfig();
+    _log(
+      '按键配置读取成功：${config.activeBindings.map((binding) => binding.description).join(' / ')}',
+    );
+    return config;
+  }
+
+  Future<void> _refreshKeyConfig() async {
+    HapticFeedback.lightImpact();
+    if (_dirtyKeys.isNotEmpty &&
+        !await _confirm(
+          title: '放弃本地修改？',
+          message: '重新读取会丢弃 ${_dirtyKeys.length} 项尚未写入的修改。',
+          confirmLabel: '放弃并读取',
+        )) {
+      return;
+    }
+    await _run(() async {
+      final config = await _readKeyConfig();
+      if (mounted) {
+        setState(() {
+          _keyConfig = config;
+          _dirtyKeys.clear();
+        });
+      }
+    });
+  }
+
+  void _changeBinding(int index, KeyBinding binding) {
+    final config = _keyConfig;
+    if (config == null) return;
+    HapticFeedback.selectionClick();
+    setState(() {
+      _keyConfig = config.copyWithActiveBinding(index, binding);
+      _selectedKeyIndex = index;
+      _dirtyKeys.add(index);
+    });
+    _log('本地修改 KEY$index → ${binding.description}，尚未写入设备');
+  }
+
+  Future<void> _restoreDefaults() async {
+    if (!await _confirm(
+      title: '恢复出厂映射？',
+      message: '先在本地生成 12 项默认映射；仍需再次点击“写入设备”并确认才会落盘。',
+      confirmLabel: '生成默认映射',
+    )) {
+      return;
+    }
+    HapticFeedback.mediumImpact();
+    setState(() {
+      _keyConfig = KeyConfig.factoryDefaults();
+      _dirtyKeys
+        ..clear()
+        ..addAll(
+          List<int>.generate(KeyConfig.activeKeyCount, (index) => index),
+        );
+    });
+    _log('已在本地恢复 12 项出厂映射，等待用户确认写入');
+  }
+
+  Future<void> _writeKeyConfig() async {
+    final draft = _keyConfig;
+    final dirty = Set<int>.from(_dirtyKeys);
+    if (draft == null || dirty.isEmpty) return;
+    if (!await _confirm(
+      title: '写入按键配置？',
+      message: '这是持久化操作。将写入 ${dirty.length} 个按键，并在写入后重新读取核验。',
+      confirmLabel: '确认写入',
+    )) {
+      return;
+    }
+    HapticFeedback.mediumImpact();
+    await _run(() async {
+      _log('写入前重新读取最新配置，只合并 ${dirty.length} 个本地修改槽位');
+      var merged = await _readKeyConfig();
+      for (final index in dirty) {
+        merged = merged.copyWithActiveBinding(
+          index,
+          draft.activeBindings[index],
+        );
+      }
+      await _board.writeKeyConfig(merged);
+      _log('SET 0x16 返回成功，开始 GET 0x15 回读核验');
+      final verified = await _readKeyConfig();
+      for (final index in dirty) {
+        if (verified.activeBindings[index] != draft.activeBindings[index]) {
+          throw BoardProtocolException('KEY$index 写入后回读不一致');
+        }
+      }
+      if (mounted) {
+        setState(() {
+          _keyConfig = verified;
+          _dirtyKeys.clear();
+        });
+      }
+      _log('按键配置写入并回读验证成功，共 ${dirty.length} 项');
+    });
+  }
+
+  Future<bool> _confirm({
+    required String title,
+    required String message,
+    required String confirmLabel,
+  }) async {
+    if (!mounted) return false;
+    return await showDialog<bool>(
+          context: context,
+          builder: (context) => AlertDialog(
+            title: Text(title),
+            content: Text(message),
+            actions: [
+              TextButton(
+                onPressed: () => Navigator.pop(context, false),
+                child: const Text('取消'),
+              ),
+              FilledButton(
+                onPressed: () => Navigator.pop(context, true),
+                child: Text(confirmLabel),
+              ),
+            ],
+          ),
+        ) ??
+        false;
+  }
+
+  Future<void> _disconnect() async {
+    HapticFeedback.mediumImpact();
+    await _run(() async {
+      await _board.disconnect();
+      _log('已主动断开设备');
+    });
+  }
+
   Future<void> _startAudio() async {
+    HapticFeedback.mediumImpact();
     await _run(() async {
       _log('查询音频 capability');
       final capabilities = await _board.queryAudioCapabilities();
@@ -189,7 +412,6 @@ class _BoardSdkPageState extends State<BoardSdkPage> {
         throw const BoardUnsupportedException('固件没有版本化 BLE mSBC 能力');
       }
       final ttl = capabilities.defaultTtlMs;
-      _log('启动音频 lease id=0x${_leaseId.toRadixString(16)} ttl=${ttl}ms');
       await _board.controlAudioStream(
         action: AudioStreamAction.start,
         scope: AudioStreamScope.session,
@@ -198,42 +420,44 @@ class _BoardSdkPageState extends State<BoardSdkPage> {
       );
       _heartbeat?.cancel();
       _heartbeat = Timer.periodic(Duration(milliseconds: ttl ~/ 2), (_) {
-        unawaited(() async {
-          try {
-            await _board.controlAudioStream(
-              action: AudioStreamAction.heartbeat,
-              scope: AudioStreamScope.session,
-              leaseId: _leaseId,
-              ttlMs: ttl,
-            );
-            _log('音频 lease heartbeat 成功');
-          } on Object catch (error, stackTrace) {
-            _heartbeat?.cancel();
-            _heartbeat = null;
-            if (mounted) setState(() => _audioRunning = false);
-            _logError('音频 lease 心跳失败', error, stackTrace);
-          }
-        }());
+        unawaited(_sendHeartbeat(ttl));
       });
       _audioFrameCount = 0;
       _audioGapCount = 0;
-      setState(() => _audioRunning = true);
-      _log('音频 lease 启动成功');
+      if (mounted) setState(() => _audioRunning = true);
+      _log('音频 lease 启动成功 id=0x${_leaseId.toRadixString(16)} ttl=${ttl}ms');
     });
   }
 
+  Future<void> _sendHeartbeat(int ttl) async {
+    try {
+      await _board.controlAudioStream(
+        action: AudioStreamAction.heartbeat,
+        scope: AudioStreamScope.session,
+        leaseId: _leaseId,
+        ttlMs: ttl,
+      );
+      _log('音频 lease heartbeat 成功');
+    } on Object catch (error, stackTrace) {
+      _heartbeat?.cancel();
+      _heartbeat = null;
+      if (mounted) setState(() => _audioRunning = false);
+      _logError('音频 lease 心跳失败', error, stackTrace);
+    }
+  }
+
   Future<void> _stopAudio() async {
+    HapticFeedback.mediumImpact();
     _heartbeat?.cancel();
     _heartbeat = null;
     await _run(() async {
-      _log('停止音频 lease');
       await _board.controlAudioStream(
         action: AudioStreamAction.stop,
         scope: AudioStreamScope.session,
         leaseId: _leaseId,
         ttlMs: 0,
       );
-      setState(() => _audioRunning = false);
+      if (mounted) setState(() => _audioRunning = false);
       _log('音频 lease 已停止');
     });
   }
@@ -256,7 +480,7 @@ class _BoardSdkPageState extends State<BoardSdkPage> {
     if (!mounted) return;
     setState(() {
       _logs.insert(0, line);
-      if (_logs.length > 100) _logs.removeLast();
+      if (_logs.length > 200) _logs.removeLast();
     });
   }
 
@@ -279,35 +503,41 @@ class _BoardSdkPageState extends State<BoardSdkPage> {
   @override
   Widget build(BuildContext context) => Scaffold(
     appBar: AppBar(title: const Text('ReAI Board SDK $exampleBuildLabel')),
-    body: ListView(
-      padding: const EdgeInsets.all(16),
-      children: [
-        FilledButton(
-          onPressed: _busy ? null : _scan,
-          child: Text(
-            _scanning
-                ? '扫描中…已发现 ${_devices.length} 台'
-                : (_busy ? '处理中…' : '扫描 REAI_VB_ 设备'),
-          ),
-        ),
-        for (final device in _devices)
-          ListTile(
-            title: Text(device.name),
-            subtitle: Text('${device.id}  RSSI ${device.rssi}'),
-            trailing: const Icon(Icons.bluetooth),
-            onTap: _busy ? null : () => _connect(device),
-          ),
-        const Divider(),
-        FilledButton.tonal(
-          onPressed: !_board.isConnected || _busy
-              ? null
-              : (_audioRunning ? _stopAudio : _startAudio),
-          child: Text(_audioRunning ? '停止音频 lease' : '启动音频 lease'),
-        ),
-        const SizedBox(height: 16),
-        const Text('事件日志', style: TextStyle(fontWeight: FontWeight.bold)),
-        for (final log in _logs) Text(log),
-      ],
+    body: AcceptanceDashboard(
+      connected: _board.isConnected,
+      device: _connectedDevice,
+      info: _deviceInfo,
+      maxGattPayload: _maxGattPayload,
+      lastEvent: _lastEvent,
+      busy: _busy,
+      scanning: _scanning,
+      devices: _devices,
+      keyConfig: _keyConfig,
+      pressedKeys: _pressedKeys,
+      eventCounts: _eventCounts,
+      selectedMode: _selectedMode,
+      selectedKeyIndex: _selectedKeyIndex,
+      dirtyKeys: _dirtyKeys,
+      audioRunning: _audioRunning,
+      audioFrameCount: _audioFrameCount,
+      audioGapCount: _audioGapCount,
+      logs: _logs,
+      onScan: _scan,
+      onConnect: _connect,
+      onDisconnect: _disconnect,
+      onRefreshKeyConfig: _refreshKeyConfig,
+      onSelectKey: (index) {
+        HapticFeedback.selectionClick();
+        setState(() => _selectedKeyIndex = index);
+      },
+      onBindingChanged: _changeBinding,
+      onWriteKeyConfig: _writeKeyConfig,
+      onRestoreDefaults: _restoreDefaults,
+      onToggleAudio: _audioRunning ? _stopAudio : _startAudio,
+      onClearLogs: () {
+        HapticFeedback.lightImpact();
+        setState(_logs.clear);
+      },
     ),
   );
 }

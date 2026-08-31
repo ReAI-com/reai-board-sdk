@@ -82,14 +82,209 @@ final class SleepTimeout {
   int get hashCode => Object.hash(disconnectedSeconds, connectedSeconds);
 }
 
+abstract final class BoardKeyClass {
+  static const media = 0x0A;
+  static const keyboard = 0x0B;
+  static const aiVoice = 0x0E;
+  static const disabled = 0xFF;
+}
+
+enum BoardKeyGroup {
+  knob('旋钮'),
+  function('功能键'),
+  mode('模式拨杆');
+
+  const BoardKeyGroup(this.label);
+  final String label;
+}
+
+final class KeyBinding {
+  const KeyBinding({required this.keyClass, required this.keyValue})
+    : assert(keyClass >= 0 && keyClass <= 0xFF),
+      assert(keyValue >= 0 && keyValue <= 0xFFFF);
+
+  final int keyClass;
+  final int keyValue;
+
+  String get description {
+    if (keyClass == BoardKeyClass.media) {
+      return _mediaBindingNames[keyValue] ??
+          (keyValue >= 0x0F10 && keyValue <= 0x0FFF
+              ? '脚本触发 ${_hex16(keyValue)}（需桌面客户端）'
+              : _hex16(keyValue));
+    }
+    if (keyClass == BoardKeyClass.keyboard) {
+      final modifier = (keyValue >> 8) & 0xFF;
+      final usage = keyValue & 0xFF;
+      final parts = <String>[
+        for (final entry in _modifierNames.entries)
+          if ((modifier & entry.key) != 0) entry.value,
+      ];
+      final usageLabel = _keyboardUsageLabel(usage);
+      if (usageLabel != null) parts.add(usageLabel);
+      return parts.isEmpty ? _hex16(keyValue) : parts.join(' + ');
+    }
+    if (keyClass == BoardKeyClass.aiVoice) return 'AI 语音（固件标记）';
+    if (keyClass == BoardKeyClass.disabled) return '禁用';
+    if (keyClass == 0 && keyValue == 0) return '未配置';
+    return '未知 ${_hex16(keyValue)}';
+  }
+
+  @override
+  bool operator ==(Object other) =>
+      other is KeyBinding &&
+      other.keyClass == keyClass &&
+      other.keyValue == keyValue;
+
+  @override
+  int get hashCode => Object.hash(keyClass, keyValue);
+}
+
+enum BoardPhysicalKey {
+  knobLeft(BoardKeyGroup.knob, '◀', '旋钮左旋', 0x0F07),
+  knobRight(BoardKeyGroup.knob, '▶', '旋钮右旋', 0x0F08),
+  knobPress(BoardKeyGroup.knob, '⏻', '旋钮按压', 0x0F09),
+  tab(BoardKeyGroup.function, 'TAB', 'Tab 键', 0x0F01),
+  createNew(BoardKeyGroup.function, 'NEW', 'New 键', 0x0F02),
+  escape(BoardKeyGroup.function, 'ESC', 'Esc 键', 0x0F03),
+  aiVoice(BoardKeyGroup.function, 'AI', 'AI 语音键', 0x0F04),
+  action(BoardKeyGroup.function, 'ACT', 'Action 键', 0x0F05),
+  enter(BoardKeyGroup.function, '↵', 'Enter 键', 0x0F06),
+  yolo(BoardKeyGroup.mode, 'YOLO', 'YOLO 拨杆', 0x0F0A),
+  plan(BoardKeyGroup.mode, 'PLAN', 'PLAN 拨杆', 0x0F0B),
+  chat(BoardKeyGroup.mode, 'CHAT', 'CHAT 拨杆', 0x0F0C);
+
+  const BoardPhysicalKey(
+    this.group,
+    this.label,
+    this.name,
+    this.defaultKeyValue,
+  );
+
+  final BoardKeyGroup group;
+  final String label;
+  final String name;
+  final int defaultKeyValue;
+
+  KeyBinding get defaultBinding =>
+      KeyBinding(keyClass: BoardKeyClass.media, keyValue: defaultKeyValue);
+}
+
 final class KeyConfig {
+  static const keyCount = 20;
+  static const activeKeyCount = 12;
+  static const bytesPerKey = 3;
+  static const byteLength = keyCount * bytesPerKey;
+
   KeyConfig(Uint8List bytes) : bytes = Uint8List.fromList(bytes) {
-    if (bytes.length != 60) {
-      throw ArgumentError.value(bytes.length, 'bytes.length', '必须是 60');
+    if (bytes.length != byteLength) {
+      throw ArgumentError.value(
+        bytes.length,
+        'bytes.length',
+        '必须是 $byteLength',
+      );
     }
   }
 
   final Uint8List bytes;
+
+  factory KeyConfig.fromActiveBindings(List<KeyBinding> bindings) {
+    if (bindings.length != activeKeyCount) {
+      throw ArgumentError.value(
+        bindings.length,
+        'bindings.length',
+        '必须是 $activeKeyCount',
+      );
+    }
+    final bytes = Uint8List(byteLength);
+    for (var index = 0; index < activeKeyCount; index++) {
+      final binding = bindings[index];
+      final offset = index * bytesPerKey;
+      bytes[offset] = binding.keyClass;
+      bytes[offset + 1] = binding.keyValue & 0xFF;
+      bytes[offset + 2] = (binding.keyValue >> 8) & 0xFF;
+    }
+    return KeyConfig(bytes);
+  }
+
+  factory KeyConfig.factoryDefaults() => KeyConfig.fromActiveBindings([
+    for (final key in BoardPhysicalKey.values) key.defaultBinding,
+  ]);
+
+  List<KeyBinding> get bindings => List<KeyBinding>.unmodifiable([
+    for (var index = 0; index < keyCount; index++)
+      KeyBinding(
+        keyClass: bytes[index * bytesPerKey],
+        keyValue:
+            bytes[index * bytesPerKey + 1] |
+            (bytes[index * bytesPerKey + 2] << 8),
+      ),
+  ]);
+
+  List<KeyBinding> get activeBindings =>
+      List<KeyBinding>.unmodifiable(bindings.take(activeKeyCount));
+
+  KeyConfig copyWithActiveBinding(int index, KeyBinding binding) {
+    if (index < 0 || index >= activeKeyCount) {
+      throw RangeError.range(index, 0, activeKeyCount - 1, 'index');
+    }
+    final updated = Uint8List.fromList(bytes);
+    final offset = index * bytesPerKey;
+    updated[offset] = binding.keyClass;
+    updated[offset + 1] = binding.keyValue & 0xFF;
+    updated[offset + 2] = (binding.keyValue >> 8) & 0xFF;
+    return KeyConfig(updated);
+  }
+}
+
+const _mediaBindingNames = <int, String>{
+  0x0F01: 'Tab（应用）',
+  0x0F02: 'New',
+  0x0F03: 'Esc（应用）',
+  0x0F04: 'AI 语音',
+  0x0F05: 'Action',
+  0x0F06: 'Enter（应用）',
+  0x0F07: '音量-',
+  0x0F08: '音量+',
+  0x0F09: '静音',
+  0x0F0A: 'YOLO 模式',
+  0x0F0B: 'PLAN 模式',
+  0x0F0C: 'CHAT 模式',
+};
+
+const _modifierNames = <int, String>{
+  0x01: 'Ctrl L',
+  0x02: 'Shift L',
+  0x04: 'Alt L',
+  0x08: 'Cmd L',
+  0x10: 'Ctrl R',
+  0x20: 'Shift R',
+  0x40: 'Alt R',
+  0x80: 'Cmd R',
+};
+
+String _hex16(int value) =>
+    '0x${value.toRadixString(16).toUpperCase().padLeft(4, '0')}';
+
+String? _keyboardUsageLabel(int usage) {
+  if (usage == 0) return null;
+  if (usage >= 0x04 && usage <= 0x1D) {
+    return String.fromCharCode('A'.codeUnitAt(0) + usage - 0x04);
+  }
+  if (usage >= 0x1E && usage <= 0x26) return '${usage - 0x1D}';
+  if (usage == 0x27) return '0';
+  return const <int, String>{
+        0x28: 'Enter',
+        0x29: 'Esc',
+        0x2A: 'Backspace',
+        0x2B: 'Tab',
+        0x2C: 'Space',
+        0x4F: '→',
+        0x50: '←',
+        0x51: '↓',
+        0x52: '↑',
+      }[usage] ??
+      'HID 0x${usage.toRadixString(16).toUpperCase().padLeft(2, '0')}';
 }
 
 enum AudioStreamAction {
