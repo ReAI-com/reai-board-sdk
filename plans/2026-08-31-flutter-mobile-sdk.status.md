@@ -4,7 +4,7 @@
 
 - 任务: Flutter 移动端 SDK
 - 启动时间: 2026-08-31
-- 当前阶段: Phase 7 PR
+- 当前阶段: Phase 8 完成
 - 需求摘要: 在 SDK 仓库新增 Flutter BLE 包并提交 PR
 - Plan 文件: `plans/2026-08-31-flutter-mobile-sdk.md`
 - Progress 文件: `plans/2026-08-31-flutter-mobile-sdk.progress.md`
@@ -68,16 +68,17 @@
 
 ### Phase 7: PR
 
-- 状态: IN_PROGRESS
-- Commit: 待创建
-- PR: 待创建
+- 状态: PASS
+- Commit: `3d9f58d feat(flutter): 新增移动端 BLE SDK`
+- PR: https://github.com/ReAI-com/reai-board-sdk/pull/9
+- CI: 7 个 job 全部通过，merge state CLEAN
 
 ### PR Review（如适用）
 
-- 状态: PENDING
+- 状态: PASS
 - Review 来源: Codex PR review
-- 处理的问题: 待执行
-- 剩余阻塞: 无
+- 处理的问题: 三类评论面和 review thread 均为空；独立 diff 复核无 actionable finding
+- 剩余阻塞: 无代码/CI 阻塞；iPhone 13 mini 与实体 Board 真机验收仍待 App 接入后执行
 
 ### Phase 8: Migration
 
