@@ -5,6 +5,16 @@ follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Added
+
+- Added `flutter/reai_board_sdk`, a Flutter BLE package for iOS and Android.
+  It mirrors the Rust `BoardDevice` command/event semantics over the firmware's
+  FE60–FE63 Vendor GATT service, includes typed reconnect/MTU/capability state,
+  and exposes versioned or legacy raw mSBC frames without bundling the LGPL
+  decoder into the MIT Flutter package.
+- Added shared Rust/Dart protocol golden vectors, a runnable mobile example,
+  platform permission templates, and Flutter CI coverage.
+
 ### Fixed
 
 - USB and BLE now share one Consumer mode-switch tracker. Endpoint usages

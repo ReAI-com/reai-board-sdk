@@ -101,6 +101,32 @@ async fn main() -> anyhow::Result<()> {
 
 ---
 
+## Flutter / iOS / Android
+
+手机 App 不应嵌入桌面端 `btleplug` / `hidapi` runtime。本仓库新增
+[`flutter/reai_board_sdk`](flutter/reai_board_sdk) Flutter BLE 包：上层继续使用与
+Rust SDK 同语义的类型化命令、事件、重连和板载音频 lease，底层改由
+`flutter_blue_plus` 对接 CoreBluetooth 和 Android GATT。
+
+```yaml
+dependencies:
+  reai_board_sdk:
+    git:
+      url: https://github.com/ReAI-com/reai-board-sdk.git
+      path: flutter/reai_board_sdk
+```
+
+移动包覆盖 FE60–FE63 扫描/连接、设备信息、按键配置、按键/旋钮/模式事件、常用设置、
+音频 capability/lease 和版本化/旧版原始 mSBC 帧。USB、DFU、工厂命令和 bindings blob
+不会伪装成手机能力。
+
+MIT Flutter 包不会直接捆绑 LGPL mSBC 解码器，只输出编码帧和连续性元数据，由宿主选择
+经过许可证评估的解码器。权限、后台重连边界、接口对照和真机清单见
+[Flutter README](flutter/reai_board_sdk/README.md)。Rust/Dart 共用 golden vectors，协议
+字节变化会在 CI 中失败。
+
+---
+
 ## 支持的平台
 
 | 系统      | 状态 | 备注                                                         |
@@ -108,9 +134,12 @@ async fn main() -> anyhow::Result<()> {
 | macOS     | CI 已验证 | `hidapi` 用 `macos-shared-device` feature                |
 | Linux     | CI 可编译 | 需装 `libdbus-1-dev libudev-dev libasound2-dev pkg-config`；原生 HID 可能还要 `udev` 规则 |
 | Windows   | 预期可用，**尚未验证** | 原生 HID 需要 WinUSB / Zadig 驱动             |
+| iOS       | Flutter CI 已验证，硬件待测 | Flutter 包，仅 CoreBluetooth BLE         |
+| Android   | Flutter CI 已验证，硬件待测 | Flutter 包，仅 Android GATT              |
 
-三种通道（USB HID / USB Audio / BLE GATT）对上述平台都已实现，差别只在 CI
-验证到什么程度。Windows 目前没有 CI job，请当作「未测试」而非「不支持」。
+桌面三种通道（USB HID / USB Audio / BLE GATT）适用于 macOS、Linux、Windows。
+iOS/Android 使用独立 Flutter BLE 包，不提供 USB。Windows 和手机硬件目前都没有真机 CI；
+当前结论是自动构建覆盖，不是物理验收。
 
 `ble` 用 `btleplug 0.12`（原生 async）。macOS 上首次 `start()` 可能要等 ~40 秒
 （CoreBluetooth adapter 预热），这是系统行为，不是 SDK 慢。

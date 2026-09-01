@@ -17,7 +17,7 @@ readme = "README.md"
 keywords = ["keyboard", "hid", "ble", "usb", "hardware"]
 categories = ["api-bindings", "hardware-support"]
 # 产品配图仅用于 GitHub / crates.io 页面展示，不进 crate 包
-exclude = ["assets/*"]
+exclude = ["assets/*", "flutter/**", "plans/**"]
 
 [package.metadata.docs.rs]
 all-features = true
