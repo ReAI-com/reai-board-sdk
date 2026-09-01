@@ -4,6 +4,14 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:reai_board_sdk/reai_board_sdk.dart';
 
 void main() {
+  test('外脑硬件 ID 使用完整 6 字节 MAC，与 App fixture 一致', () {
+    expect(
+      normalizeVibeBoardHardwareId('cc:8a:2b:19:7c:f0'),
+      'REAI_VB_CC8A2B197CF0',
+    );
+    expect(() => normalizeVibeBoardHardwareId('7C2A'), throwsArgumentError);
+  });
+
   test('按 3 字节小端格式解析 20 个按键槽位', () {
     final bytes = Uint8List(KeyConfig.byteLength);
     bytes.setAll(0, const [BoardKeyClass.media, 0x34, 0x12]);

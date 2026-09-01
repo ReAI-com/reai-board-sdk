@@ -28,7 +28,8 @@ class FakeBoardClock implements BoardClock {
   }
 }
 
-class FakeBoardTransport implements BoardBleTransport {
+class FakeBoardTransport
+    implements BoardBleTransport, BoardSystemDeviceTransport {
   final states = StreamController<BoardTransportState>.broadcast();
   final notifications = StreamController<BoardNotification>.broadcast();
   final scanUpdates = StreamController<List<BleDeviceInfo>>.broadcast();
@@ -39,6 +40,7 @@ class FakeBoardTransport implements BoardBleTransport {
   bool connected = false;
   int connectCalls = 0;
   final autoConnectValues = <bool>[];
+  List<BleDeviceInfo> systemDeviceValues = const [];
 
   @override
   Stream<BoardTransportState> get connectionStates => states.stream;
@@ -61,6 +63,11 @@ class FakeBoardTransport implements BoardBleTransport {
       Future.value(const [
         BleDeviceInfo(id: 'board-1', name: 'REAI_VB_0729', rssi: -42),
       ]);
+
+  @override
+  Future<List<BleDeviceInfo>> systemDevices({
+    String serviceUuid = BoardGatt.serviceUuid,
+  }) async => systemDeviceValues;
 
   void updatePayload(int value) {
     payload = value;
@@ -166,6 +173,12 @@ void main() {
     transport.pendingScan!.complete(const [board]);
     expect(await scan, const [board]);
     await subscription.cancel();
+  });
+
+  test('FE60 system-device 恢复可在扫描前接管系统连接', () async {
+    transport.systemDeviceValues = const [board];
+
+    expect(await device.systemDevices(), const [board]);
   });
 
   test('pending 0x12 优先作为响应，不重复发模式推送', () async {

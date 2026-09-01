@@ -86,6 +86,18 @@ final class BoardDevice {
     return _transport.scan(timeout: timeout ?? _config.scanTimeout);
   }
 
+  /// 查询系统已连接且暴露指定 service 的设备；iOS 冷恢复时优先于重新扫描。
+  Future<List<BleDeviceInfo>> systemDevices({
+    String serviceUuid = BoardGatt.serviceUuid,
+  }) async {
+    await start();
+    final transport = _transport;
+    if (transport is! BoardSystemDeviceTransport) return const [];
+    return (transport as BoardSystemDeviceTransport).systemDevices(
+      serviceUuid: serviceUuid,
+    );
+  }
+
   Future<void> connect(BleDeviceInfo device) async {
     await start();
     _target = device;

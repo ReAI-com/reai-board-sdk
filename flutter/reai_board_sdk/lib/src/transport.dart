@@ -1,5 +1,6 @@
 import 'dart:typed_data';
 
+import 'constants.dart';
 import 'models.dart';
 
 enum BoardTransportState { connecting, connected, disconnected }
@@ -43,4 +44,11 @@ abstract interface class BoardBleTransport {
   Future<void> disconnect();
 
   Future<void> dispose();
+}
+
+/// 可选的系统已连接设备查询能力。拆成独立接口以保持自定义 transport 兼容。
+abstract interface class BoardSystemDeviceTransport {
+  Future<List<BleDeviceInfo>> systemDevices({
+    String serviceUuid = BoardGatt.serviceUuid,
+  });
 }

@@ -8,7 +8,8 @@ import 'models.dart';
 import 'transport.dart';
 
 /// `flutter_blue_plus` 的薄 I/O 适配器；不包含协议和业务状态机。
-final class FlutterBluePlusBoardTransport implements BoardBleTransport {
+final class FlutterBluePlusBoardTransport
+    implements BoardBleTransport, BoardSystemDeviceTransport {
   final _states = StreamController<BoardTransportState>.broadcast();
   final _notifications = StreamController<BoardNotification>.broadcast();
   final _scanResults = StreamController<List<BleDeviceInfo>>.broadcast();
@@ -81,6 +82,27 @@ final class FlutterBluePlusBoardTransport implements BoardBleTransport {
       _scanSubscription = null;
     }
     return _sortedDevices(found);
+  }
+
+  @override
+  Future<List<BleDeviceInfo>> systemDevices({
+    String serviceUuid = BoardGatt.serviceUuid,
+  }) async {
+    _checkNotDisposed();
+    try {
+      final devices = await FlutterBluePlus.systemDevices([Guid(serviceUuid)]);
+      return devices
+          .map(
+            (device) => BleDeviceInfo(
+              id: device.remoteId.str,
+              name: device.platformName,
+              rssi: 0,
+            ),
+          )
+          .toList(growable: false);
+    } on Object catch (error) {
+      throw BoardTransportException('查询系统已连接 FE60 设备失败', cause: error);
+    }
   }
 
   @override

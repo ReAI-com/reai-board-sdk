@@ -56,6 +56,7 @@ print('${info.chipId} ${info.firmwareVersion} ${info.batteryLevel}%');
 `BoardDevice` 负责：
 
 - 扫描 `REAI_VB_` 广播名、连接、断开与已知 peripheral id 重连；
+- `systemDevices(serviceUuid: FE60)` 优先接管 iOS 系统已连接设备，再以完整身份回读校验；
 - `scanResults` 逐步推送扫描快照，`scan()` 同时保留最终列表返回值；
 - FE61 串行命令，FE62 响应/异步事件分流，FE63 音频帧；
 - `readDeviceInfo`、按键配置、模式、静默录音、休眠、App online、URL；
@@ -63,6 +64,9 @@ print('${info.chipId} ${info.firmwareVersion} ${info.batteryLevel}%');
 - `BoardPhysicalKey`、`KeyBinding.description` 和 `copyWithActiveBinding` 支持移动端安全展示、局部合并；
 - 音频 capability 三态、lease start/heartbeat/stop、sequence gap；
 - 断连补发按键和 AI 语音键释放，避免上层出现“按住不放”。
+
+外脑库存/绑定身份统一使用 `normalizeVibeBoardHardwareId(info.macAddress)`，
+结果形如 `REAI_VB_CC8A2B197CF0`。广播短名和 peripheral UUID 不是硬件身份。
 
 ## Rust 接口对照
 
