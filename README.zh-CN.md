@@ -311,6 +311,22 @@ device.start_board_audio(transport, AudioStreamScope::Session, lease_id, ttl_ms)
 - `start_usb_uac_compat()` 是给旧固件的兼容路径。它走系统音频栈，所以必须显式
   调用，也只有它会触发麦克风授权弹窗。
 
+**UAC 立体声（双麦固件 v1.72+）。** 立体声固件把 UAC 设备枚举为 16kHz/2ch，
+原始 [L,R] 交织直出。`start_usb_uac_compat()` 仍向 `PcmSink` 送 16kHz mono
+（降混，契约不变），并且现在会显式选中 2ch 配置，不再落进 macOS
+`default_input_config` 的缓存陷阱。研究排障时还可以把降混前的原始交织样本
+落盘成 PCM16 WAV：
+
+```rust
+device.set_uac_stereo_wav_path(Some("uac_stereo.wav".into())); // 须在 start_usb_uac_compat() 之前
+device.start_usb_uac_compat()?;
+// ……之后
+device.stop_local_audio_reader(); // 触发原始 WAV 落盘
+```
+
+样本驻留内存（约 128 KB/s），stop 时一次性写入——适合短采集，不要用于超长
+录制。旧单声道固件行为完全不变。见 `examples/uac_capture.rs`。
+
 ---
 
 ## 设备命令
@@ -398,6 +414,7 @@ cargo run --example usb_probe        # USB HID + USB Audio
 cargo run --example ble_probe        # BLE 扫描 + 连接 + 音频 + 按键
 cargo run --example device_demo      # 读设备信息 / 按键配置 / 写回往返
 cargo run --example listen_demo      # 两种事件门面并排演示
+cargo run --example uac_capture      # UAC 兼容通路采集：电平 + 可选 mono/stereo WAV 落盘
 ```
 
 所有 example 都需要连上设备；事件打到 stdout。若还要输出工厂原始物理按键事件，

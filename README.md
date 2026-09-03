@@ -343,6 +343,25 @@ device.start_board_audio(transport, AudioStreamScope::Session, lease_id, ttl_ms)
   goes through the OS audio stack, so it is explicit, opt-in, and the only route
   that can raise the microphone prompt.
 
+**UAC stereo (dual-mic firmware v1.72+).** The stereo firmware enumerates its
+UAC device as 16 kHz/2ch and streams raw interleaved `[L,R]`.
+`start_usb_uac_compat()` still delivers 16 kHz mono to your `PcmSink`
+(downmixed, contract unchanged) and now selects the 2ch config explicitly
+instead of falling into the macOS `default_input_config` cache trap. For
+research and troubleshooting you can additionally dump the pre-downmix
+interleaved samples to a PCM16 WAV:
+
+```rust
+device.set_uac_stereo_wav_path(Some("uac_stereo.wav".into())); // before start_usb_uac_compat()
+device.start_usb_uac_compat()?;
+// ... later
+device.stop_local_audio_reader(); // flushes the raw WAV
+```
+
+Samples buffer in memory (~128 KB/s) and are written once on stop — fine for
+short captures, not for hour-long recordings. Legacy mono firmware keeps
+working unchanged. See `examples/uac_capture.rs`.
+
 ---
 
 ## Device commands
@@ -432,6 +451,7 @@ cargo run --example usb_probe        # USB HID + USB Audio
 cargo run --example ble_probe        # BLE scan + connect + audio + keys
 cargo run --example device_demo      # read device info / key config / round-trip write
 cargo run --example listen_demo      # both event facade flavors side-by-side
+cargo run --example uac_capture      # UAC compat capture: levels + optional mono/stereo WAV dumps
 ```
 
 All examples need a board connected; they print events to stdout. Add

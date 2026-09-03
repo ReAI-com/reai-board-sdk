@@ -7,6 +7,23 @@ follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Added
 
+- UAC now pairs with the dual-mic stereo firmware (v1.72+, `[L,R]` interleaved
+  16 kHz/2ch output). Explicit cpal config selection still prefers 16 kHz/1ch/F32
+  but falls back to 2ch before the `default_input_config()` escape hatch, so
+  stereo-firmware boards no longer live on the macOS cpal config-cache trap.
+  The `PcmSink` 16 kHz mono contract is unchanged for all consumers, and legacy
+  mono-firmware behavior is locked in by regression tests (1ch preference over
+  2ch, F32-only matching, `default_input_config` fallback for I16-only devices).
+- Added opt-in raw stereo capture: `UsbAudioCapture::new_with_stereo_wav` (and
+  `BoardDevice::set_uac_stereo_wav_path` / blocking twin) dumps the pre-downmix
+  interleaved samples to a PCM16 WAV on `stop()`. Samples buffer in memory
+  (~128 KB/s stereo @ 16 kHz), keeping file I/O off the cpal realtime callback —
+  not intended for very long recordings. Default behavior (`UsbAudioCapture::new`)
+  writes nothing.
+- Added `examples/uac_capture.rs`, the open-source counterpart of the internal
+  `reai-vb audio --uac` command: level metering plus optional `--out` (downmixed
+  16 kHz mono WAV) and `--stereo-out` (raw interleaved WAV) flags; with no flags
+  it saves nothing.
 - Added `flutter/reai_board_sdk`, a Flutter BLE package for iOS and Android.
   It mirrors the Rust `BoardDevice` command/event semantics over the firmware's
   FE60–FE63 Vendor GATT service, includes typed reconnect/MTU/capability state,

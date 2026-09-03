@@ -208,6 +208,17 @@ impl BoardDeviceBlocking {
     pub fn start_usb_uac_compat(&self) -> anyhow::Result<()> {
         self.device.start_usb_uac_compat()
     }
+
+    /// 设置 UAC 立体声原始 WAV 落盘路径(降混前交织 \[L,R],双麦研究数据;opt-in)。
+    /// **须在 `start_usb_uac_compat` 前调用**;`None` = 不落盘(默认)。
+    /// 非 `usb` feature 构建下为 no-op。
+    #[cfg(feature = "usb")]
+    pub fn set_uac_stereo_wav_path(&self, path: Option<String>) {
+        self.device.set_uac_stereo_wav_path(path);
+    }
+
+    #[cfg(not(feature = "usb"))]
+    pub fn set_uac_stereo_wav_path(&self, _path: Option<String>) {}
     pub fn stop_local_audio_reader(&self) {
         self.device.stop_local_audio_reader();
     }

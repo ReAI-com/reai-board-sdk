@@ -81,6 +81,9 @@ pub struct BoardDeviceCore {
     pcm_sink: Mutex<Option<Arc<dyn PcmSink>>>,
     #[cfg(feature = "usb")]
     usb_capture: Mutex<Option<UsbAudioCapture>>,
+    /// UAC 立体声原始 WAV 落盘路径(研究数据,opt-in;须在 start_usb_uac_compat 前调)
+    #[cfg(feature = "usb")]
+    uac_stereo_wav_path: Mutex<Option<String>>,
     #[cfg(feature = "usb")]
     usb_hid_audio: Mutex<Option<UsbVendorAudioReader>>,
     audio_capability_state: Mutex<AudioCapabilityState>,
@@ -121,6 +124,8 @@ impl BoardDeviceCore {
             #[cfg(feature = "usb")]
             usb_capture: Mutex::new(None),
             #[cfg(feature = "usb")]
+            uac_stereo_wav_path: Mutex::new(None),
+            #[cfg(feature = "usb")]
             usb_hid_audio: Mutex::new(None),
             audio_capability_state: Mutex::new(AudioCapabilityState::default()),
             active_audio_transport: Mutex::new(None),
@@ -141,6 +146,14 @@ impl BoardDeviceCore {
     /// 设置 PCM sink(板载 mSBC 经 EncodedAudioDecoderSink 解码后送;UAC 兼容路径直送)
     pub fn set_pcm_sink(&self, sink: Arc<dyn PcmSink>) {
         *self.pcm_sink.lock().unwrap() = Some(sink);
+    }
+
+    /// 设置 UAC 立体声原始 WAV 落盘路径(降混前交织 \[L,R] 研究数据,opt-in)。
+    /// **须在 `start_usb_uac_compat` 前调用**;`None` = 不落盘(默认)。
+    /// 内存驻留代价见 `UsbAudioCapture::new_with_stereo_wav`,勿用于超长录制。
+    #[cfg(feature = "usb")]
+    pub fn set_uac_stereo_wav_path(&self, path: Option<String>) {
+        *self.uac_stereo_wav_path.lock().unwrap() = path;
     }
 
     /// 设置解码后的 AudioFrame sink(优先于 pcm_sink,额外带传输与连续性信息)
@@ -1144,7 +1157,10 @@ impl BoardDeviceCore {
                 .unwrap()
                 .clone()
                 .ok_or_else(|| anyhow::anyhow!("尚未设置 PcmSink"))?;
-            let capture = UsbAudioCapture::new(pcm);
+            let capture = UsbAudioCapture::new_with_stereo_wav(
+                pcm,
+                self.uac_stereo_wav_path.lock().unwrap().clone(),
+            );
             capture.start()?;
             *self.usb_capture.lock().unwrap() = Some(capture);
             *self.active_audio_transport.lock().unwrap() = Some(AudioTransport::UsbUac);
