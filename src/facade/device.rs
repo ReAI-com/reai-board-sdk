@@ -27,9 +27,12 @@ use super::events::{EventStream, EventStreamError};
 #[derive(Debug, Clone, Default)]
 pub struct BoardConfig {
     pub hotplug: HotplugConfig,
-    /// macOS（`virtual-mic` feature）：启动开关——把板子音频暴露为系统级
+    /// macOS / Windows（`virtual-mic` feature）：启动开关——把板子音频暴露为系统级
     /// 麦克风 "ReAI-Vibe-Board"。默认关闭。见 [`crate::virtual_mic::VirtualMicConfig`]。
-    #[cfg(all(feature = "virtual-mic", target_os = "macos"))]
+    #[cfg(all(
+        feature = "virtual-mic",
+        any(target_os = "macos", target_os = "windows")
+    ))]
     pub virtual_mic: crate::virtual_mic::VirtualMicConfig,
 }
 
@@ -74,7 +77,10 @@ impl BoardDevice {
     /// 命令/事件消费需在 tokio runtime 上下文(async 命令要 await,start 要 tokio::spawn)。
     pub fn open(config: BoardConfig) -> anyhow::Result<Self> {
         let core = Arc::new(BoardDeviceCore::new(config.hotplug)?);
-        #[cfg(all(feature = "virtual-mic", target_os = "macos"))]
+        #[cfg(all(
+            feature = "virtual-mic",
+            any(target_os = "macos", target_os = "windows")
+        ))]
         core.set_virtual_mic_config(config.virtual_mic);
         let event_tx = core.event_sender().clone();
         Ok(Self {

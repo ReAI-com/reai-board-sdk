@@ -41,9 +41,12 @@ pub mod runtime;
 #[cfg(any(feature = "usb", feature = "ble"))]
 pub mod facade;
 
-// macOS virtual microphone: exposes the board as a system-level input device
-// when connected over BLE. Feature-gated (off by default); macOS-only.
-#[cfg(all(feature = "virtual-mic", target_os = "macos"))]
+// System-level microphone for a BLE-connected board. Feature-gated (off by
+// default); implemented on macOS and Windows.
+#[cfg(all(
+    feature = "virtual-mic",
+    any(target_os = "macos", target_os = "windows")
+))]
 pub mod virtual_mic;
 
 // ============ Top-level re-exports ============

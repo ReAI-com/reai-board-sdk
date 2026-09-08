@@ -16,6 +16,11 @@ use std::time::Duration;
 use anyhow::Result;
 use tokio::sync::broadcast;
 
+#[cfg(all(
+    feature = "virtual-mic",
+    any(target_os = "macos", target_os = "windows")
+))]
+use crate::kernel::audio::AudioFrame;
 use crate::kernel::audio::{
     AudioCapabilities, AudioCapabilityState, AudioStreamAction, AudioStreamScope, AudioStreamState,
     AudioTransport,
@@ -25,8 +30,6 @@ use crate::kernel::event::{
 };
 use crate::kernel::protocol_hid::*;
 use crate::kernel::sink::{AudioFrameSink, CountingSink, PcmAudioFrameAdapter, PcmSink};
-#[cfg(all(feature = "virtual-mic", target_os = "macos"))]
-use crate::kernel::audio::AudioFrame;
 use crate::kernel::types::ConnectionType;
 use crate::runtime::hotplug::{spawn_blocking_with_runloop, HotplugConfig, HotplugManager};
 use crate::tool::parse::{parse_device_info_from_buf, parse_device_info_from_gatt};
@@ -81,10 +84,16 @@ pub struct BoardDeviceCore {
     audio_frame_sink: Mutex<Option<Arc<dyn AudioFrameSink>>>,
     /// PCM sink(USB Audio + BLE mSBC 解码后统一到 f32)
     pcm_sink: Mutex<Option<Arc<dyn PcmSink>>>,
-    /// macOS 虚拟麦克风:启动开关配置 + 懒创建的发送端(首次音频链路时生效)
-    #[cfg(all(feature = "virtual-mic", target_os = "macos"))]
+    /// 虚拟麦克风:启动开关配置 + 懒创建的发送端(首次音频链路时生效)
+    #[cfg(all(
+        feature = "virtual-mic",
+        any(target_os = "macos", target_os = "windows")
+    ))]
     virtual_mic_config: Mutex<crate::virtual_mic::VirtualMicConfig>,
-    #[cfg(all(feature = "virtual-mic", target_os = "macos"))]
+    #[cfg(all(
+        feature = "virtual-mic",
+        any(target_os = "macos", target_os = "windows")
+    ))]
     virtual_mic: Mutex<Option<Arc<crate::virtual_mic::VirtualMic>>>,
     #[cfg(feature = "usb")]
     usb_capture: Mutex<Option<UsbAudioCapture>>,
@@ -128,9 +137,15 @@ impl BoardDeviceCore {
             vendor_gatt_client: Arc::new(Mutex::new(None)),
             audio_frame_sink: Mutex::new(None),
             pcm_sink: Mutex::new(None),
-            #[cfg(all(feature = "virtual-mic", target_os = "macos"))]
+            #[cfg(all(
+                feature = "virtual-mic",
+                any(target_os = "macos", target_os = "windows")
+            ))]
             virtual_mic_config: Mutex::new(crate::virtual_mic::VirtualMicConfig::default()),
-            #[cfg(all(feature = "virtual-mic", target_os = "macos"))]
+            #[cfg(all(
+                feature = "virtual-mic",
+                any(target_os = "macos", target_os = "windows")
+            ))]
             virtual_mic: Mutex::new(None),
             #[cfg(feature = "usb")]
             usb_capture: Mutex::new(None),
@@ -159,8 +174,11 @@ impl BoardDeviceCore {
         *self.pcm_sink.lock().unwrap() = Some(sink);
     }
 
-    /// macOS 虚拟麦克风启动开关(由 facade::open 从 BoardConfig 传入)。
-    #[cfg(all(feature = "virtual-mic", target_os = "macos"))]
+    /// 虚拟麦克风启动开关(由 facade::open 从 BoardConfig 传入)。
+    #[cfg(all(
+        feature = "virtual-mic",
+        any(target_os = "macos", target_os = "windows")
+    ))]
     pub fn set_virtual_mic_config(&self, config: crate::virtual_mic::VirtualMicConfig) {
         *self.virtual_mic_config.lock().unwrap() = config;
     }
@@ -417,7 +435,10 @@ impl BoardDeviceCore {
     pub fn shutdown(&self) {
         // 先关闭启动门，再通知/回收任务，防连接回调在清理窗口重建 capture。
         self.started.store(false, Ordering::SeqCst);
-        #[cfg(all(feature = "virtual-mic", target_os = "macos"))]
+        #[cfg(all(
+            feature = "virtual-mic",
+            any(target_os = "macos", target_os = "windows")
+        ))]
         {
             // 丢弃发送端(socket);系统设备保留,无数据时呈现静音
             *self.virtual_mic.lock().unwrap() = None;
@@ -1658,15 +1679,21 @@ impl BoardDeviceCore {
             } else {
                 Arc::new(CountingSink::new())
             };
-        #[cfg(all(feature = "virtual-mic", target_os = "macos"))]
+        #[cfg(all(
+            feature = "virtual-mic",
+            any(target_os = "macos", target_os = "windows")
+        ))]
         if let Some(vm) = self.virtual_mic_sink() {
             return Arc::new(VirtualMicTee { base, vm });
         }
         base
     }
 
-    /// macOS 虚拟麦克风发送端,懒创建(首次音频链路时;失败只降级不阻塞音频)。
-    #[cfg(all(feature = "virtual-mic", target_os = "macos"))]
+    /// 虚拟麦克风发送端,懒创建(首次音频链路时;失败只降级不阻塞音频)。
+    #[cfg(all(
+        feature = "virtual-mic",
+        any(target_os = "macos", target_os = "windows")
+    ))]
     fn virtual_mic_sink(&self) -> Option<Arc<crate::virtual_mic::VirtualMic>> {
         let mut slot = self.virtual_mic.lock().unwrap();
         if slot.is_some() {
@@ -1723,14 +1750,20 @@ fn capability_query_matches_current_connection(
     current_connection == Some(expected_connection) && current_epoch == expected_epoch
 }
 
-/// macOS 虚拟麦克风并行投递:解码帧同时送主 sink 与系统虚拟麦克风。
-#[cfg(all(feature = "virtual-mic", target_os = "macos"))]
+/// 虚拟麦克风并行投递:解码帧同时送主 sink 与系统虚拟麦克风。
+#[cfg(all(
+    feature = "virtual-mic",
+    any(target_os = "macos", target_os = "windows")
+))]
 struct VirtualMicTee {
     base: Arc<dyn AudioFrameSink>,
     vm: Arc<crate::virtual_mic::VirtualMic>,
 }
 
-#[cfg(all(feature = "virtual-mic", target_os = "macos"))]
+#[cfg(all(
+    feature = "virtual-mic",
+    any(target_os = "macos", target_os = "windows")
+))]
 impl AudioFrameSink for VirtualMicTee {
     fn on_audio_frame(&self, frame: AudioFrame<'_>) {
         let pcm = frame.pcm;
