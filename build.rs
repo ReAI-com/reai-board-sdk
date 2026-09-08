@@ -21,17 +21,28 @@ fn main() {
     }
 
     println!("cargo:rerun-if-changed=virtual-mic");
+    println!("cargo:rerun-if-env-changed=REAI_VIRTUAL_MIC_CODESIGN_ID");
 
     let manifest_dir = PathBuf::from(env::var("CARGO_MANIFEST_DIR").unwrap());
     let driver_src = manifest_dir.join("virtual-mic/driver");
     let build_dir = PathBuf::from(env::var("OUT_DIR").unwrap()).join("driver-build");
 
+    // The SDK ships the driver ad-hoc signed (enough to load, see the
+    // virtual-mic docs). Product developers distributing it sign it with
+    // their own Developer ID certificate via this variable.
+    let mut configure_args = vec![
+        String::from("-S"),
+        driver_src.display().to_string(),
+        String::from("-B"),
+        build_dir.display().to_string(),
+        String::from("-DCMAKE_BUILD_TYPE=Release"),
+    ];
+    if let Ok(codesign_id) = env::var("REAI_VIRTUAL_MIC_CODESIGN_ID") {
+        configure_args.push(format!("-DCODESIGN_ID={codesign_id}"));
+    }
+
     let status = Command::new("cmake")
-        .arg("-S")
-        .arg(&driver_src)
-        .arg("-B")
-        .arg(&build_dir)
-        .arg("-DCMAKE_BUILD_TYPE=Release")
+        .args(&configure_args)
         .status()
         .expect("cmake not found: the `virtual-mic` feature requires cmake (brew install cmake)");
     assert!(status.success(), "cmake configure failed for virtual-mic driver");

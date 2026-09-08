@@ -388,6 +388,12 @@ Notes (all verified on macOS 26):
 - Building the feature requires `cmake` (`brew install cmake`); the driver is a
   universal arm64 + x86_64 binary. The feature is off by default and does not
   affect other users' builds.
+- The driver ships **ad-hoc signed** — enough to load on the build machine. The
+  SDK does not sign on your behalf: product developers distributing it should
+  sign with **their own** Developer ID certificate by setting the
+  `REAI_VIRTUAL_MIC_CODESIGN_ID` environment variable at build time (e.g.
+  `REAI_VIRTUAL_MIC_CODESIGN_ID="Developer ID Application: Your Name" cargo build ...`),
+  or build `virtual-mic/driver` with cmake directly and pass `CODESIGN_ID`.
 - Install happens once (copies the bundle into `/Library/Audio/Plug-Ins/HAL/`
   and restarts coreaudiod); BLE reconnects need no reinstall, and the device
   presents silence while nothing is pumped.

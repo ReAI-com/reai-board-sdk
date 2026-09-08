@@ -351,6 +351,11 @@ device.set_pcm_sink(Arc::new(VirtualMic::start()?));
 
 - 构建该 feature 需要 `cmake`（`brew install cmake`）；驱动产物为
   arm64 + x86_64 双架构。feature 默认关闭，不影响其他用户的构建。
+- 驱动默认 **adhoc 签名**——本机加载即可用。SDK 不代签：对外分发产品的开发
+  者应使用**自己的** Developer ID 证书签名，构建时设
+  `REAI_VIRTUAL_MIC_CODESIGN_ID` 环境变量（如
+  `REAI_VIRTUAL_MIC_CODESIGN_ID="Developer ID Application: 你的名字" cargo build ...`），
+  也可以自行用 cmake 构建 `virtual-mic/driver` 并传 `CODESIGN_ID`。
 - 安装一次完成（拷贝 bundle 到 `/Library/Audio/Plug-Ins/HAL/` 并重启
   coreaudiod）；BLE 断开重连无需重装，无数据泵入时设备呈现静音。
 - **读取该设备的 App 遵循 macOS 正常麦克风权限流程**。注意：裸用
