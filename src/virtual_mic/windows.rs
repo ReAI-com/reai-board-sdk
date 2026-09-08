@@ -29,7 +29,11 @@ use crate::kernel::sink::PcmSink;
 const CONTROL_DEVICE_PATH: &str = r"\\.\ReAIVibeBoardVirtualMic";
 const DRIVER_DIR_ENV: &str = "REAI_VIRTUAL_MIC_DRIVER_DIR";
 const DRIVER_INF: &str = "ReAIVibeBoardVirtualMic.inf";
-const ROOT_DEVICE_ID: &str = "ROOT\\REAIVB\\0000";
+/// The root devnode's instance ID depends on how it was created: devcon
+/// `install` lands on `ROOT\MEDIA\0000` (class enumerator), while a plain
+/// `pnputil /add-driver /install` on some builds yields `ROOT\REAIVB\0000`.
+/// `uninstall` tries both.
+const ROOT_DEVICE_IDS: [&str; 2] = ["ROOT\\MEDIA\\0000", "ROOT\\REAIVB\\0000"];
 /// How long `ensure_installed` waits for the control device to appear after
 /// pnputil reports success (the service starts asynchronously).
 const DEVICE_SETTLE_TIMEOUT: Duration = Duration::from_secs(5);
@@ -79,7 +83,14 @@ impl VirtualMic {
     /// Remove the root-enumerated development device. The package remains in
     /// the Driver Store so a later `ensure_installed()` is cheap.
     pub fn uninstall() -> Result<()> {
-        run_elevated_pnputil(&["/remove-device", ROOT_DEVICE_ID])
+        let mut last = Ok(());
+        for id in ROOT_DEVICE_IDS {
+            last = run_elevated_pnputil(&["/remove-device", id]);
+            if last.is_ok() {
+                return Ok(());
+            }
+        }
+        last
     }
 
     /// Connect to the running driver. It stays silent until PCM is supplied.
