@@ -5,6 +5,8 @@ follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [0.3.3] — 2026-09-08
+
 ### Added
 
 - **Windows support for `virtual-mic` (development mode).** A SysVAD-derived
@@ -29,6 +31,12 @@ follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - Added `examples/virtual_mic_loopback.rs` — driver-only loopback self-test
   (no board needed): feeds a sine into the control device, captures from the
   system endpoint, asserts non-silence, writes a WAV for ear-checking.
+
+### Fixed
+
+- Fixed `VirtualMic::on_pcm` on Windows to use `write_all`: a partial write to the
+  control device would leave the S16 stream misaligned (every later frame shifts
+  into noise); failures now drop the frame and log at debug level.
 
 ## [0.3.2] — 2026-09-08
 

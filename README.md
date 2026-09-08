@@ -12,7 +12,7 @@ coding workflows.
 
 [Product site](https://b.reai.com) | [中文文档](README.zh-CN.md) | [API docs (docs.rs)](https://docs.rs/reai-board-sdk) | [Changelog](CHANGELOG.md)
 
-[![ReAI-Vibe-Board](https://raw.githubusercontent.com/ReAI-com/reai-board-sdk/v0.3.2/assets/board-unibody.webp)](https://b.reai.com)
+[![ReAI-Vibe-Board](https://raw.githubusercontent.com/ReAI-com/reai-board-sdk/v0.3.3/assets/board-unibody.webp)](https://b.reai.com)
 
 ---
 
@@ -34,7 +34,7 @@ three for the knob, six for the keys, three for the lever.
 
 | | | |
 |:-:|:-:|:-:|
-| [![Knob](https://raw.githubusercontent.com/ReAI-com/reai-board-sdk/v0.3.2/assets/board-knob.webp)](https://b.reai.com) | [![Dual mic](https://raw.githubusercontent.com/ReAI-com/reai-board-sdk/v0.3.2/assets/board-mic.webp)](https://b.reai.com) | [![Keys](https://raw.githubusercontent.com/ReAI-com/reai-board-sdk/v0.3.2/assets/board-keys.webp)](https://b.reai.com) |
+| [![Knob](https://raw.githubusercontent.com/ReAI-com/reai-board-sdk/v0.3.3/assets/board-knob.webp)](https://b.reai.com) | [![Dual mic](https://raw.githubusercontent.com/ReAI-com/reai-board-sdk/v0.3.3/assets/board-mic.webp)](https://b.reai.com) | [![Keys](https://raw.githubusercontent.com/ReAI-com/reai-board-sdk/v0.3.3/assets/board-keys.webp)](https://b.reai.com) |
 | Metal knob | Dual-mic array | Tactile keys |
 
 ---

@@ -1,138 +1,138 @@
 [
 {
-  "directory": "/Users/lucong/Dev/github.com/reai.com/ai-vibe-board/open-sdk/target/debug/build/reai-board-sdk-50d0ed3c05bfbcdf/out/driver-build/libASPL-build",
+  "directory": "/Users/lucong/Dev/github.com/reai.com/ai-vibe-board/open-sdk/target/debug/build/reai-board-sdk-e7314632ee7b5af5/out/driver-build/libASPL-build",
   "command": "/usr/bin/c++  -I/Users/lucong/Dev/github.com/reai.com/ai-vibe-board/open-sdk/virtual-mic/libASPL/include -F/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk/System/Library/Frameworks  -Wall -Wextra -Wno-invalid-offsetof -Wno-unused-parameter -O3 -DNDEBUG -std=gnu++17 -arch arm64 -arch x86_64 -isysroot /Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk -fPIC -o CMakeFiles/libASPL.dir/src/Device.cpp.o -c /Users/lucong/Dev/github.com/reai.com/ai-vibe-board/open-sdk/virtual-mic/libASPL/src/Device.cpp",
   "file": "/Users/lucong/Dev/github.com/reai.com/ai-vibe-board/open-sdk/virtual-mic/libASPL/src/Device.cpp",
   "output": "libASPL-build/CMakeFiles/libASPL.dir/src/Device.cpp.o"
 },
 {
-  "directory": "/Users/lucong/Dev/github.com/reai.com/ai-vibe-board/open-sdk/target/debug/build/reai-board-sdk-50d0ed3c05bfbcdf/out/driver-build/libASPL-build",
+  "directory": "/Users/lucong/Dev/github.com/reai.com/ai-vibe-board/open-sdk/target/debug/build/reai-board-sdk-e7314632ee7b5af5/out/driver-build/libASPL-build",
   "command": "/usr/bin/c++  -I/Users/lucong/Dev/github.com/reai.com/ai-vibe-board/open-sdk/virtual-mic/libASPL/include -F/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk/System/Library/Frameworks  -Wall -Wextra -Wno-invalid-offsetof -Wno-unused-parameter -O3 -DNDEBUG -std=gnu++17 -arch arm64 -arch x86_64 -isysroot /Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk -fPIC -o CMakeFiles/libASPL.dir/src/Device.g.cpp.o -c /Users/lucong/Dev/github.com/reai.com/ai-vibe-board/open-sdk/virtual-mic/libASPL/src/Device.g.cpp",
   "file": "/Users/lucong/Dev/github.com/reai.com/ai-vibe-board/open-sdk/virtual-mic/libASPL/src/Device.g.cpp",
   "output": "libASPL-build/CMakeFiles/libASPL.dir/src/Device.g.cpp.o"
 },
 {
-  "directory": "/Users/lucong/Dev/github.com/reai.com/ai-vibe-board/open-sdk/target/debug/build/reai-board-sdk-50d0ed3c05bfbcdf/out/driver-build/libASPL-build",
+  "directory": "/Users/lucong/Dev/github.com/reai.com/ai-vibe-board/open-sdk/target/debug/build/reai-board-sdk-e7314632ee7b5af5/out/driver-build/libASPL-build",
   "command": "/usr/bin/c++  -I/Users/lucong/Dev/github.com/reai.com/ai-vibe-board/open-sdk/virtual-mic/libASPL/include -F/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk/System/Library/Frameworks  -Wall -Wextra -Wno-invalid-offsetof -Wno-unused-parameter -O3 -DNDEBUG -std=gnu++17 -arch arm64 -arch x86_64 -isysroot /Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk -fPIC -o CMakeFiles/libASPL.dir/src/MuteControl.cpp.o -c /Users/lucong/Dev/github.com/reai.com/ai-vibe-board/open-sdk/virtual-mic/libASPL/src/MuteControl.cpp",
   "file": "/Users/lucong/Dev/github.com/reai.com/ai-vibe-board/open-sdk/virtual-mic/libASPL/src/MuteControl.cpp",
   "output": "libASPL-build/CMakeFiles/libASPL.dir/src/MuteControl.cpp.o"
 },
 {
-  "directory": "/Users/lucong/Dev/github.com/reai.com/ai-vibe-board/open-sdk/target/debug/build/reai-board-sdk-50d0ed3c05bfbcdf/out/driver-build/libASPL-build",
+  "directory": "/Users/lucong/Dev/github.com/reai.com/ai-vibe-board/open-sdk/target/debug/build/reai-board-sdk-e7314632ee7b5af5/out/driver-build/libASPL-build",
   "command": "/usr/bin/c++  -I/Users/lucong/Dev/github.com/reai.com/ai-vibe-board/open-sdk/virtual-mic/libASPL/include -F/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk/System/Library/Frameworks  -Wall -Wextra -Wno-invalid-offsetof -Wno-unused-parameter -O3 -DNDEBUG -std=gnu++17 -arch arm64 -arch x86_64 -isysroot /Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk -fPIC -o CMakeFiles/libASPL.dir/src/MuteControl.g.cpp.o -c /Users/lucong/Dev/github.com/reai.com/ai-vibe-board/open-sdk/virtual-mic/libASPL/src/MuteControl.g.cpp",
   "file": "/Users/lucong/Dev/github.com/reai.com/ai-vibe-board/open-sdk/virtual-mic/libASPL/src/MuteControl.g.cpp",
   "output": "libASPL-build/CMakeFiles/libASPL.dir/src/MuteControl.g.cpp.o"
 },
 {
-  "directory": "/Users/lucong/Dev/github.com/reai.com/ai-vibe-board/open-sdk/target/debug/build/reai-board-sdk-50d0ed3c05bfbcdf/out/driver-build/libASPL-build",
+  "directory": "/Users/lucong/Dev/github.com/reai.com/ai-vibe-board/open-sdk/target/debug/build/reai-board-sdk-e7314632ee7b5af5/out/driver-build/libASPL-build",
   "command": "/usr/bin/c++  -I/Users/lucong/Dev/github.com/reai.com/ai-vibe-board/open-sdk/virtual-mic/libASPL/include -F/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk/System/Library/Frameworks  -Wall -Wextra -Wno-invalid-offsetof -Wno-unused-parameter -O3 -DNDEBUG -std=gnu++17 -arch arm64 -arch x86_64 -isysroot /Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk -fPIC -o CMakeFiles/libASPL.dir/src/Object.cpp.o -c /Users/lucong/Dev/github.com/reai.com/ai-vibe-board/open-sdk/virtual-mic/libASPL/src/Object.cpp",
   "file": "/Users/lucong/Dev/github.com/reai.com/ai-vibe-board/open-sdk/virtual-mic/libASPL/src/Object.cpp",
   "output": "libASPL-build/CMakeFiles/libASPL.dir/src/Object.cpp.o"
 },
 {
-  "directory": "/Users/lucong/Dev/github.com/reai.com/ai-vibe-board/open-sdk/target/debug/build/reai-board-sdk-50d0ed3c05bfbcdf/out/driver-build/libASPL-build",
+  "directory": "/Users/lucong/Dev/github.com/reai.com/ai-vibe-board/open-sdk/target/debug/build/reai-board-sdk-e7314632ee7b5af5/out/driver-build/libASPL-build",
   "command": "/usr/bin/c++  -I/Users/lucong/Dev/github.com/reai.com/ai-vibe-board/open-sdk/virtual-mic/libASPL/include -F/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk/System/Library/Frameworks  -Wall -Wextra -Wno-invalid-offsetof -Wno-unused-parameter -O3 -DNDEBUG -std=gnu++17 -arch arm64 -arch x86_64 -isysroot /Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk -fPIC -o CMakeFiles/libASPL.dir/src/Object.g.cpp.o -c /Users/lucong/Dev/github.com/reai.com/ai-vibe-board/open-sdk/virtual-mic/libASPL/src/Object.g.cpp",
   "file": "/Users/lucong/Dev/github.com/reai.com/ai-vibe-board/open-sdk/virtual-mic/libASPL/src/Object.g.cpp",
   "output": "libASPL-build/CMakeFiles/libASPL.dir/src/Object.g.cpp.o"
 },
 {
-  "directory": "/Users/lucong/Dev/github.com/reai.com/ai-vibe-board/open-sdk/target/debug/build/reai-board-sdk-50d0ed3c05bfbcdf/out/driver-build/libASPL-build",
+  "directory": "/Users/lucong/Dev/github.com/reai.com/ai-vibe-board/open-sdk/target/debug/build/reai-board-sdk-e7314632ee7b5af5/out/driver-build/libASPL-build",
   "command": "/usr/bin/c++  -I/Users/lucong/Dev/github.com/reai.com/ai-vibe-board/open-sdk/virtual-mic/libASPL/include -F/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk/System/Library/Frameworks  -Wall -Wextra -Wno-invalid-offsetof -Wno-unused-parameter -O3 -DNDEBUG -std=gnu++17 -arch arm64 -arch x86_64 -isysroot /Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk -fPIC -o CMakeFiles/libASPL.dir/src/Plugin.cpp.o -c /Users/lucong/Dev/github.com/reai.com/ai-vibe-board/open-sdk/virtual-mic/libASPL/src/Plugin.cpp",
   "file": "/Users/lucong/Dev/github.com/reai.com/ai-vibe-board/open-sdk/virtual-mic/libASPL/src/Plugin.cpp",
   "output": "libASPL-build/CMakeFiles/libASPL.dir/src/Plugin.cpp.o"
 },
 {
-  "directory": "/Users/lucong/Dev/github.com/reai.com/ai-vibe-board/open-sdk/target/debug/build/reai-board-sdk-50d0ed3c05bfbcdf/out/driver-build/libASPL-build",
+  "directory": "/Users/lucong/Dev/github.com/reai.com/ai-vibe-board/open-sdk/target/debug/build/reai-board-sdk-e7314632ee7b5af5/out/driver-build/libASPL-build",
   "command": "/usr/bin/c++  -I/Users/lucong/Dev/github.com/reai.com/ai-vibe-board/open-sdk/virtual-mic/libASPL/include -F/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk/System/Library/Frameworks  -Wall -Wextra -Wno-invalid-offsetof -Wno-unused-parameter -O3 -DNDEBUG -std=gnu++17 -arch arm64 -arch x86_64 -isysroot /Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk -fPIC -o CMakeFiles/libASPL.dir/src/Plugin.g.cpp.o -c /Users/lucong/Dev/github.com/reai.com/ai-vibe-board/open-sdk/virtual-mic/libASPL/src/Plugin.g.cpp",
   "file": "/Users/lucong/Dev/github.com/reai.com/ai-vibe-board/open-sdk/virtual-mic/libASPL/src/Plugin.g.cpp",
   "output": "libASPL-build/CMakeFiles/libASPL.dir/src/Plugin.g.cpp.o"
 },
 {
-  "directory": "/Users/lucong/Dev/github.com/reai.com/ai-vibe-board/open-sdk/target/debug/build/reai-board-sdk-50d0ed3c05bfbcdf/out/driver-build/libASPL-build",
+  "directory": "/Users/lucong/Dev/github.com/reai.com/ai-vibe-board/open-sdk/target/debug/build/reai-board-sdk-e7314632ee7b5af5/out/driver-build/libASPL-build",
   "command": "/usr/bin/c++  -I/Users/lucong/Dev/github.com/reai.com/ai-vibe-board/open-sdk/virtual-mic/libASPL/include -F/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk/System/Library/Frameworks  -Wall -Wextra -Wno-invalid-offsetof -Wno-unused-parameter -O3 -DNDEBUG -std=gnu++17 -arch arm64 -arch x86_64 -isysroot /Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk -fPIC -o CMakeFiles/libASPL.dir/src/Stream.cpp.o -c /Users/lucong/Dev/github.com/reai.com/ai-vibe-board/open-sdk/virtual-mic/libASPL/src/Stream.cpp",
   "file": "/Users/lucong/Dev/github.com/reai.com/ai-vibe-board/open-sdk/virtual-mic/libASPL/src/Stream.cpp",
   "output": "libASPL-build/CMakeFiles/libASPL.dir/src/Stream.cpp.o"
 },
 {
-  "directory": "/Users/lucong/Dev/github.com/reai.com/ai-vibe-board/open-sdk/target/debug/build/reai-board-sdk-50d0ed3c05bfbcdf/out/driver-build/libASPL-build",
+  "directory": "/Users/lucong/Dev/github.com/reai.com/ai-vibe-board/open-sdk/target/debug/build/reai-board-sdk-e7314632ee7b5af5/out/driver-build/libASPL-build",
   "command": "/usr/bin/c++  -I/Users/lucong/Dev/github.com/reai.com/ai-vibe-board/open-sdk/virtual-mic/libASPL/include -F/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk/System/Library/Frameworks  -Wall -Wextra -Wno-invalid-offsetof -Wno-unused-parameter -O3 -DNDEBUG -std=gnu++17 -arch arm64 -arch x86_64 -isysroot /Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk -fPIC -o CMakeFiles/libASPL.dir/src/Stream.g.cpp.o -c /Users/lucong/Dev/github.com/reai.com/ai-vibe-board/open-sdk/virtual-mic/libASPL/src/Stream.g.cpp",
   "file": "/Users/lucong/Dev/github.com/reai.com/ai-vibe-board/open-sdk/virtual-mic/libASPL/src/Stream.g.cpp",
   "output": "libASPL-build/CMakeFiles/libASPL.dir/src/Stream.g.cpp.o"
 },
 {
-  "directory": "/Users/lucong/Dev/github.com/reai.com/ai-vibe-board/open-sdk/target/debug/build/reai-board-sdk-50d0ed3c05bfbcdf/out/driver-build/libASPL-build",
+  "directory": "/Users/lucong/Dev/github.com/reai.com/ai-vibe-board/open-sdk/target/debug/build/reai-board-sdk-e7314632ee7b5af5/out/driver-build/libASPL-build",
   "command": "/usr/bin/c++  -I/Users/lucong/Dev/github.com/reai.com/ai-vibe-board/open-sdk/virtual-mic/libASPL/include -F/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk/System/Library/Frameworks  -Wall -Wextra -Wno-invalid-offsetof -Wno-unused-parameter -O3 -DNDEBUG -std=gnu++17 -arch arm64 -arch x86_64 -isysroot /Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk -fPIC -o CMakeFiles/libASPL.dir/src/VolumeControl.cpp.o -c /Users/lucong/Dev/github.com/reai.com/ai-vibe-board/open-sdk/virtual-mic/libASPL/src/VolumeControl.cpp",
   "file": "/Users/lucong/Dev/github.com/reai.com/ai-vibe-board/open-sdk/virtual-mic/libASPL/src/VolumeControl.cpp",
   "output": "libASPL-build/CMakeFiles/libASPL.dir/src/VolumeControl.cpp.o"
 },
 {
-  "directory": "/Users/lucong/Dev/github.com/reai.com/ai-vibe-board/open-sdk/target/debug/build/reai-board-sdk-50d0ed3c05bfbcdf/out/driver-build/libASPL-build",
+  "directory": "/Users/lucong/Dev/github.com/reai.com/ai-vibe-board/open-sdk/target/debug/build/reai-board-sdk-e7314632ee7b5af5/out/driver-build/libASPL-build",
   "command": "/usr/bin/c++  -I/Users/lucong/Dev/github.com/reai.com/ai-vibe-board/open-sdk/virtual-mic/libASPL/include -F/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk/System/Library/Frameworks  -Wall -Wextra -Wno-invalid-offsetof -Wno-unused-parameter -O3 -DNDEBUG -std=gnu++17 -arch arm64 -arch x86_64 -isysroot /Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk -fPIC -o CMakeFiles/libASPL.dir/src/VolumeControl.g.cpp.o -c /Users/lucong/Dev/github.com/reai.com/ai-vibe-board/open-sdk/virtual-mic/libASPL/src/VolumeControl.g.cpp",
   "file": "/Users/lucong/Dev/github.com/reai.com/ai-vibe-board/open-sdk/virtual-mic/libASPL/src/VolumeControl.g.cpp",
   "output": "libASPL-build/CMakeFiles/libASPL.dir/src/VolumeControl.g.cpp.o"
 },
 {
-  "directory": "/Users/lucong/Dev/github.com/reai.com/ai-vibe-board/open-sdk/target/debug/build/reai-board-sdk-50d0ed3c05bfbcdf/out/driver-build/libASPL-build",
+  "directory": "/Users/lucong/Dev/github.com/reai.com/ai-vibe-board/open-sdk/target/debug/build/reai-board-sdk-e7314632ee7b5af5/out/driver-build/libASPL-build",
   "command": "/usr/bin/c++  -I/Users/lucong/Dev/github.com/reai.com/ai-vibe-board/open-sdk/virtual-mic/libASPL/include -F/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk/System/Library/Frameworks  -Wall -Wextra -Wno-invalid-offsetof -Wno-unused-parameter -O3 -DNDEBUG -std=gnu++17 -arch arm64 -arch x86_64 -isysroot /Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk -fPIC -o CMakeFiles/libASPL.dir/src/Bridge.g.cpp.o -c /Users/lucong/Dev/github.com/reai.com/ai-vibe-board/open-sdk/virtual-mic/libASPL/src/Bridge.g.cpp",
   "file": "/Users/lucong/Dev/github.com/reai.com/ai-vibe-board/open-sdk/virtual-mic/libASPL/src/Bridge.g.cpp",
   "output": "libASPL-build/CMakeFiles/libASPL.dir/src/Bridge.g.cpp.o"
 },
 {
-  "directory": "/Users/lucong/Dev/github.com/reai.com/ai-vibe-board/open-sdk/target/debug/build/reai-board-sdk-50d0ed3c05bfbcdf/out/driver-build/libASPL-build",
+  "directory": "/Users/lucong/Dev/github.com/reai.com/ai-vibe-board/open-sdk/target/debug/build/reai-board-sdk-e7314632ee7b5af5/out/driver-build/libASPL-build",
   "command": "/usr/bin/c++  -I/Users/lucong/Dev/github.com/reai.com/ai-vibe-board/open-sdk/virtual-mic/libASPL/include -F/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk/System/Library/Frameworks  -Wall -Wextra -Wno-invalid-offsetof -Wno-unused-parameter -O3 -DNDEBUG -std=gnu++17 -arch arm64 -arch x86_64 -isysroot /Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk -fPIC -o CMakeFiles/libASPL.dir/src/Strings.g.cpp.o -c /Users/lucong/Dev/github.com/reai.com/ai-vibe-board/open-sdk/virtual-mic/libASPL/src/Strings.g.cpp",
   "file": "/Users/lucong/Dev/github.com/reai.com/ai-vibe-board/open-sdk/virtual-mic/libASPL/src/Strings.g.cpp",
   "output": "libASPL-build/CMakeFiles/libASPL.dir/src/Strings.g.cpp.o"
 },
 {
-  "directory": "/Users/lucong/Dev/github.com/reai.com/ai-vibe-board/open-sdk/target/debug/build/reai-board-sdk-50d0ed3c05bfbcdf/out/driver-build/libASPL-build",
+  "directory": "/Users/lucong/Dev/github.com/reai.com/ai-vibe-board/open-sdk/target/debug/build/reai-board-sdk-e7314632ee7b5af5/out/driver-build/libASPL-build",
   "command": "/usr/bin/c++  -I/Users/lucong/Dev/github.com/reai.com/ai-vibe-board/open-sdk/virtual-mic/libASPL/include -F/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk/System/Library/Frameworks  -Wall -Wextra -Wno-invalid-offsetof -Wno-unused-parameter -O3 -DNDEBUG -std=gnu++17 -arch arm64 -arch x86_64 -isysroot /Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk -fPIC -o CMakeFiles/libASPL.dir/src/Client.cpp.o -c /Users/lucong/Dev/github.com/reai.com/ai-vibe-board/open-sdk/virtual-mic/libASPL/src/Client.cpp",
   "file": "/Users/lucong/Dev/github.com/reai.com/ai-vibe-board/open-sdk/virtual-mic/libASPL/src/Client.cpp",
   "output": "libASPL-build/CMakeFiles/libASPL.dir/src/Client.cpp.o"
 },
 {
-  "directory": "/Users/lucong/Dev/github.com/reai.com/ai-vibe-board/open-sdk/target/debug/build/reai-board-sdk-50d0ed3c05bfbcdf/out/driver-build/libASPL-build",
+  "directory": "/Users/lucong/Dev/github.com/reai.com/ai-vibe-board/open-sdk/target/debug/build/reai-board-sdk-e7314632ee7b5af5/out/driver-build/libASPL-build",
   "command": "/usr/bin/c++  -I/Users/lucong/Dev/github.com/reai.com/ai-vibe-board/open-sdk/virtual-mic/libASPL/include -F/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk/System/Library/Frameworks  -Wall -Wextra -Wno-invalid-offsetof -Wno-unused-parameter -O3 -DNDEBUG -std=gnu++17 -arch arm64 -arch x86_64 -isysroot /Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk -fPIC -o CMakeFiles/libASPL.dir/src/Convert.cpp.o -c /Users/lucong/Dev/github.com/reai.com/ai-vibe-board/open-sdk/virtual-mic/libASPL/src/Convert.cpp",
   "file": "/Users/lucong/Dev/github.com/reai.com/ai-vibe-board/open-sdk/virtual-mic/libASPL/src/Convert.cpp",
   "output": "libASPL-build/CMakeFiles/libASPL.dir/src/Convert.cpp.o"
 },
 {
-  "directory": "/Users/lucong/Dev/github.com/reai.com/ai-vibe-board/open-sdk/target/debug/build/reai-board-sdk-50d0ed3c05bfbcdf/out/driver-build/libASPL-build",
+  "directory": "/Users/lucong/Dev/github.com/reai.com/ai-vibe-board/open-sdk/target/debug/build/reai-board-sdk-e7314632ee7b5af5/out/driver-build/libASPL-build",
   "command": "/usr/bin/c++  -I/Users/lucong/Dev/github.com/reai.com/ai-vibe-board/open-sdk/virtual-mic/libASPL/include -F/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk/System/Library/Frameworks  -Wall -Wextra -Wno-invalid-offsetof -Wno-unused-parameter -O3 -DNDEBUG -std=gnu++17 -arch arm64 -arch x86_64 -isysroot /Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk -fPIC -o CMakeFiles/libASPL.dir/src/Dispatcher.cpp.o -c /Users/lucong/Dev/github.com/reai.com/ai-vibe-board/open-sdk/virtual-mic/libASPL/src/Dispatcher.cpp",
   "file": "/Users/lucong/Dev/github.com/reai.com/ai-vibe-board/open-sdk/virtual-mic/libASPL/src/Dispatcher.cpp",
   "output": "libASPL-build/CMakeFiles/libASPL.dir/src/Dispatcher.cpp.o"
 },
 {
-  "directory": "/Users/lucong/Dev/github.com/reai.com/ai-vibe-board/open-sdk/target/debug/build/reai-board-sdk-50d0ed3c05bfbcdf/out/driver-build/libASPL-build",
+  "directory": "/Users/lucong/Dev/github.com/reai.com/ai-vibe-board/open-sdk/target/debug/build/reai-board-sdk-e7314632ee7b5af5/out/driver-build/libASPL-build",
   "command": "/usr/bin/c++  -I/Users/lucong/Dev/github.com/reai.com/ai-vibe-board/open-sdk/virtual-mic/libASPL/include -F/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk/System/Library/Frameworks  -Wall -Wextra -Wno-invalid-offsetof -Wno-unused-parameter -O3 -DNDEBUG -std=gnu++17 -arch arm64 -arch x86_64 -isysroot /Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk -fPIC -o CMakeFiles/libASPL.dir/src/Driver.cpp.o -c /Users/lucong/Dev/github.com/reai.com/ai-vibe-board/open-sdk/virtual-mic/libASPL/src/Driver.cpp",
   "file": "/Users/lucong/Dev/github.com/reai.com/ai-vibe-board/open-sdk/virtual-mic/libASPL/src/Driver.cpp",
   "output": "libASPL-build/CMakeFiles/libASPL.dir/src/Driver.cpp.o"
 },
 {
-  "directory": "/Users/lucong/Dev/github.com/reai.com/ai-vibe-board/open-sdk/target/debug/build/reai-board-sdk-50d0ed3c05bfbcdf/out/driver-build/libASPL-build",
+  "directory": "/Users/lucong/Dev/github.com/reai.com/ai-vibe-board/open-sdk/target/debug/build/reai-board-sdk-e7314632ee7b5af5/out/driver-build/libASPL-build",
   "command": "/usr/bin/c++  -I/Users/lucong/Dev/github.com/reai.com/ai-vibe-board/open-sdk/virtual-mic/libASPL/include -F/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk/System/Library/Frameworks  -Wall -Wextra -Wno-invalid-offsetof -Wno-unused-parameter -O3 -DNDEBUG -std=gnu++17 -arch arm64 -arch x86_64 -isysroot /Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk -fPIC -o CMakeFiles/libASPL.dir/src/Storage.cpp.o -c /Users/lucong/Dev/github.com/reai.com/ai-vibe-board/open-sdk/virtual-mic/libASPL/src/Storage.cpp",
   "file": "/Users/lucong/Dev/github.com/reai.com/ai-vibe-board/open-sdk/virtual-mic/libASPL/src/Storage.cpp",
   "output": "libASPL-build/CMakeFiles/libASPL.dir/src/Storage.cpp.o"
 },
 {
-  "directory": "/Users/lucong/Dev/github.com/reai.com/ai-vibe-board/open-sdk/target/debug/build/reai-board-sdk-50d0ed3c05bfbcdf/out/driver-build/libASPL-build",
+  "directory": "/Users/lucong/Dev/github.com/reai.com/ai-vibe-board/open-sdk/target/debug/build/reai-board-sdk-e7314632ee7b5af5/out/driver-build/libASPL-build",
   "command": "/usr/bin/c++  -I/Users/lucong/Dev/github.com/reai.com/ai-vibe-board/open-sdk/virtual-mic/libASPL/include -F/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk/System/Library/Frameworks  -Wall -Wextra -Wno-invalid-offsetof -Wno-unused-parameter -O3 -DNDEBUG -std=gnu++17 -arch arm64 -arch x86_64 -isysroot /Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk -fPIC -o CMakeFiles/libASPL.dir/src/Strings.cpp.o -c /Users/lucong/Dev/github.com/reai.com/ai-vibe-board/open-sdk/virtual-mic/libASPL/src/Strings.cpp",
   "file": "/Users/lucong/Dev/github.com/reai.com/ai-vibe-board/open-sdk/virtual-mic/libASPL/src/Strings.cpp",
   "output": "libASPL-build/CMakeFiles/libASPL.dir/src/Strings.cpp.o"
 },
 {
-  "directory": "/Users/lucong/Dev/github.com/reai.com/ai-vibe-board/open-sdk/target/debug/build/reai-board-sdk-50d0ed3c05bfbcdf/out/driver-build/libASPL-build",
+  "directory": "/Users/lucong/Dev/github.com/reai.com/ai-vibe-board/open-sdk/target/debug/build/reai-board-sdk-e7314632ee7b5af5/out/driver-build/libASPL-build",
   "command": "/usr/bin/c++  -I/Users/lucong/Dev/github.com/reai.com/ai-vibe-board/open-sdk/virtual-mic/libASPL/include -F/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk/System/Library/Frameworks  -Wall -Wextra -Wno-invalid-offsetof -Wno-unused-parameter -O3 -DNDEBUG -std=gnu++17 -arch arm64 -arch x86_64 -isysroot /Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk -fPIC -o CMakeFiles/libASPL.dir/src/Tracer.cpp.o -c /Users/lucong/Dev/github.com/reai.com/ai-vibe-board/open-sdk/virtual-mic/libASPL/src/Tracer.cpp",
   "file": "/Users/lucong/Dev/github.com/reai.com/ai-vibe-board/open-sdk/virtual-mic/libASPL/src/Tracer.cpp",
   "output": "libASPL-build/CMakeFiles/libASPL.dir/src/Tracer.cpp.o"
 },
 {
-  "directory": "/Users/lucong/Dev/github.com/reai.com/ai-vibe-board/open-sdk/target/debug/build/reai-board-sdk-50d0ed3c05bfbcdf/out/driver-build/libASPL-build",
+  "directory": "/Users/lucong/Dev/github.com/reai.com/ai-vibe-board/open-sdk/target/debug/build/reai-board-sdk-e7314632ee7b5af5/out/driver-build/libASPL-build",
   "command": "/usr/bin/c++  -I/Users/lucong/Dev/github.com/reai.com/ai-vibe-board/open-sdk/virtual-mic/libASPL/include -F/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk/System/Library/Frameworks  -Wall -Wextra -Wno-invalid-offsetof -Wno-unused-parameter -O3 -DNDEBUG -std=gnu++17 -arch arm64 -arch x86_64 -isysroot /Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk -fPIC -o CMakeFiles/libASPL.dir/src/Uid.cpp.o -c /Users/lucong/Dev/github.com/reai.com/ai-vibe-board/open-sdk/virtual-mic/libASPL/src/Uid.cpp",
   "file": "/Users/lucong/Dev/github.com/reai.com/ai-vibe-board/open-sdk/virtual-mic/libASPL/src/Uid.cpp",
   "output": "libASPL-build/CMakeFiles/libASPL.dir/src/Uid.cpp.o"
 },
 {
-  "directory": "/Users/lucong/Dev/github.com/reai.com/ai-vibe-board/open-sdk/target/debug/build/reai-board-sdk-50d0ed3c05bfbcdf/out/driver-build/libASPL-build",
+  "directory": "/Users/lucong/Dev/github.com/reai.com/ai-vibe-board/open-sdk/target/debug/build/reai-board-sdk-e7314632ee7b5af5/out/driver-build/libASPL-build",
   "command": "/usr/bin/c++  -I/Users/lucong/Dev/github.com/reai.com/ai-vibe-board/open-sdk/virtual-mic/libASPL/include -F/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk/System/Library/Frameworks  -Wall -Wextra -Wno-invalid-offsetof -Wno-unused-parameter -O3 -DNDEBUG -std=gnu++17 -arch arm64 -arch x86_64 -isysroot /Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk -fPIC -o CMakeFiles/libASPL.dir/src/VolumeCurve.cpp.o -c /Users/lucong/Dev/github.com/reai.com/ai-vibe-board/open-sdk/virtual-mic/libASPL/src/VolumeCurve.cpp",
   "file": "/Users/lucong/Dev/github.com/reai.com/ai-vibe-board/open-sdk/virtual-mic/libASPL/src/VolumeCurve.cpp",
   "output": "libASPL-build/CMakeFiles/libASPL.dir/src/VolumeCurve.cpp.o"
