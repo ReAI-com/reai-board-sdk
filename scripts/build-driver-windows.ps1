@@ -63,7 +63,9 @@ if (-not (Test-Path (Join-Path $wdkRoot "Include"))) {
 Write-Host "== msbuild $Configuration|$Platform =="
 # SignMode=Off: the WDK's built-in SignTask wants an elevated certificate
 # container; this script signs the package itself below (-TestSign).
-& $msbuild $solution "/m" "/p:Configuration=$Configuration" "/p:Platform=$Platform" "/p:SignMode=Off"
+# SkipPackageVerification: the packaged InfVerif task wants bin\x86\infverif.dll,
+# which some WDK installs lack; inf2cat's signability test still runs.
+& $msbuild $solution "/m" "/p:Configuration=$Configuration" "/p:Platform=$Platform" "/p:SignMode=Off" "/p:SkipPackageVerification=true"
 if ($LASTEXITCODE -ne 0) {
     throw "msbuild failed with exit code $LASTEXITCODE"
 }

@@ -17,15 +17,20 @@
 //!   测试证书后,设 `REAI_VIRTUAL_MIC_DRIVER_DIR` 指向包目录再运行。
 
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Mutex};
+#[cfg(any(target_os = "macos", target_os = "windows"))]
+use std::sync::Arc;
+use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
 use reai_board_sdk::sink::PcmSink;
+#[cfg(any(target_os = "macos", target_os = "windows"))]
 use reai_board_sdk::virtual_mic::VirtualMicConfig;
+#[cfg(any(target_os = "macos", target_os = "windows"))]
 use reai_board_sdk::{
     AudioStreamAction, AudioStreamScope, AudioTransport, BoardConfig, BoardDevice, BoardEvent,
 };
 
+#[cfg(any(target_os = "macos", target_os = "windows"))]
 #[tokio::main]
 async fn main() {
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info"))
@@ -188,4 +193,14 @@ impl PcmSink for MeteredSink {
             }
         }
     }
+}
+
+#[cfg(not(any(target_os = "macos", target_os = "windows")))]
+fn main() {
+    println!("此 example 仅支持 macOS / Windows");
+}
+
+#[cfg(not(any(target_os = "macos", target_os = "windows")))]
+fn main() {
+    println!("此 example 仅支持 macOS / Windows");
 }

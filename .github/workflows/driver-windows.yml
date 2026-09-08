@@ -55,8 +55,11 @@ jobs:
       - name: Build driver package
         shell: pwsh
         run: |
+          # SkipPackageVerification: the packaged InfVerif task wants bin\x86\infverif.dll,
+          # which some WDK installs lack; inf2cat's signability test still runs.
           msbuild virtual-mic/driver-windows/ReAIVibeBoardVirtualMic.sln `
-            /m /p:Configuration=Release /p:Platform=${{ matrix.platform }}
+            /m /p:Configuration=Release /p:Platform=${{ matrix.platform }} /p:SignMode=Off `
+            /p:SkipPackageVerification=true
 
       - name: Create test certificate and sign package
         shell: pwsh
@@ -72,14 +75,14 @@ jobs:
           Export-PfxCertificate -Cert $cert -FilePath $pfx `
             -Password (ConvertTo-SecureString "reai-vbm" -Force -AsPlainText) | Out-Null
 
-          $out = "virtual-mic/driver-windows/out/Release${{ matrix.platform }}"
+          $out = "virtual-mic/driver-windows/out/Release-${{ matrix.platform }}"
           New-Item -ItemType Directory -Force -Path $out | Out-Null
 
-          $files = Get-ChildItem -Path "virtual-mic/driver-windows" -Recurse -Include `
-            "ReAIVibeBoardVirtualMic.sys","ReAIVibeBoardVirtualMic.inf","ReAIVibeBoardVirtualMic.cat" |
-            Where-Object { $_.FullName -match "Release" -and $_.FullName -match "${{ matrix.platform }}" -and $_.FullName -notmatch "out\\" }
-
-          foreach ($file in $files) {
+          foreach ($name in @("ReAIVibeBoardVirtualMic.sys","ReAIVibeBoardVirtualMic.inf","ReAIVibeBoardVirtualMic.cat")) {
+            $file = Get-ChildItem -Path "virtual-mic/driver-windows" -Recurse -Filter $name |
+              Where-Object { $_.FullName -match '\\package\\' -and $_.FullName -notmatch 'out' } |
+              Select-Object -First 1
+            if (-not $file) { throw "built package file not found: $name" }
             & $signtool.FullName sign /f $pfx /p "reai-vbm" /fd SHA256 $file.FullName
             if ($LASTEXITCODE -ne 0) { throw "signtool failed for $($file.FullName)" }
             Copy-Item $file.FullName $out -Force
@@ -91,4 +94,4 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: reai-vibe-board-virtual-mic-${{ matrix.platform }}
-          path: virtual-mic/driver-windows/out/Release${{ matrix.platform }}/
+          path: virtual-mic/driver-windows/out/Release-${{ matrix.platform }}/

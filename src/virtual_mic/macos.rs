@@ -12,7 +12,7 @@
 //! 启动开关（推荐,SDK 自管生命周期,失败只降级）:
 //!
 //! ```no_run
-//! use reai_board_sdk::{BoardConfig, virtual_mic::VirtualMicConfig};
+//! use reai_board_sdk::{BoardConfig, BoardDevice, virtual_mic::VirtualMicConfig};
 //!
 //! # fn main() -> anyhow::Result<()> {
 //! let device = BoardDevice::open(BoardConfig {
