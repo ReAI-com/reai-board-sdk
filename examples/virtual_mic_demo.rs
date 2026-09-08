@@ -6,7 +6,7 @@
 //! ```
 //!
 //! 流程:首次运行会请求管理员授权安装驱动(弹系统密码框)→ 等 BLE 连上板子
-//! → 解码 PCM 持续送入系统设备 "ReAI Vibe Board"。之后在 系统设置 → 声音 →
+//! → 解码 PCM 持续送入系统设备 "ReAI-Vibe-Board"。之后在 系统设置 → 声音 →
 //! 输入 可见该设备;用 QuickTime / 语音备忘录等普通 App 选它录音即可
 //! (普通 App 遵循正常麦克风权限流程)。
 //!
@@ -67,7 +67,7 @@ async fn main() {
     }
 
     println!("=== ReAI-Vibe-Board Virtual Mic Demo ===");
-    println!("连上板子后对其说话,系统内用 \"ReAI Vibe Board\" 这个麦克风录音。Ctrl+C 退出\n");
+    println!("连上板子后对其说话,系统内用 \"ReAI-Vibe-Board\" 这个麦克风录音。Ctrl+C 退出\n");
 
     let mut events = device.events();
     let lease_id = 0x564D_4143; // "VMAC"
@@ -99,7 +99,7 @@ async fn main() {
                         ).await {
                             Ok(_) => {
                                 managed_lease = true;
-                                println!("[音频] BLE 音频流已建立,泵入 \"ReAI Vibe Board\"");
+                                println!("[音频] BLE 音频流已建立,泵入 \"ReAI-Vibe-Board\"");
                             }
                             Err(error) => {
                                 eprintln!("[版本化 BLE 音频不可用] {error}; 尝试旧固件 session-only");

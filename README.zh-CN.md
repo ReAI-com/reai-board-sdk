@@ -11,7 +11,7 @@
 
 [产品官网](https://b.reai.com) | [English README](README.md) | [API 文档 (docs.rs)](https://docs.rs/reai-board-sdk) | [更新日志](CHANGELOG.md)
 
-[![ReAI-Vibe-Board](https://raw.githubusercontent.com/ReAI-com/reai-board-sdk/v0.3.0/assets/board-unibody.webp)](https://b.reai.com)
+[![ReAI-Vibe-Board](https://raw.githubusercontent.com/ReAI-com/reai-board-sdk/v0.3.2/assets/board-unibody.webp)](https://b.reai.com)
 
 ---
 
@@ -32,7 +32,7 @@ CNC 铝合金一体机身，带金属旋钮和三段式模式拨杆。SDK 实际
 
 | | | |
 |:-:|:-:|:-:|
-| [![金属旋钮](https://raw.githubusercontent.com/ReAI-com/reai-board-sdk/v0.3.0/assets/board-knob.webp)](https://b.reai.com) | [![双麦阵列](https://raw.githubusercontent.com/ReAI-com/reai-board-sdk/v0.3.0/assets/board-mic.webp)](https://b.reai.com) | [![段落感按键](https://raw.githubusercontent.com/ReAI-com/reai-board-sdk/v0.3.0/assets/board-keys.webp)](https://b.reai.com) |
+| [![金属旋钮](https://raw.githubusercontent.com/ReAI-com/reai-board-sdk/v0.3.2/assets/board-knob.webp)](https://b.reai.com) | [![双麦阵列](https://raw.githubusercontent.com/ReAI-com/reai-board-sdk/v0.3.2/assets/board-mic.webp)](https://b.reai.com) | [![段落感按键](https://raw.githubusercontent.com/ReAI-com/reai-board-sdk/v0.3.2/assets/board-keys.webp)](https://b.reai.com) |
 | 金属旋钮 | 双麦阵列 | 段落感按键 |
 
 ---
@@ -334,7 +334,7 @@ BLE 连接时系统不会为板子创建音频设备——BLE 走的是自定义
 系统蓝牙栈不认得它。`virtual-mic` feature 补上这最后一环：SDK 附带一个 CoreAudio
 HAL 插件（源码在 `virtual-mic/`，内嵌 vendored
 [libASPL](https://github.com/gavv/libASPL)，MIT），在系统中注册 16 kHz mono
-输入设备 **"ReAI Vibe Board"**，并把 `PcmSink` 收到的 PCM 经回环 UDP 泵进去。
+输入设备 **"ReAI-Vibe-Board"**，并把 `PcmSink` 收到的 PCM 经回环 UDP 泵进去。
 之后系统设置与任意 App 都能直接选用板子麦克风。
 
 **启动开关**（推荐）：在 `BoardConfig` 里打开，SDK 自管生命周期；与自设的

@@ -5,13 +5,15 @@ follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [0.3.2] — 2026-09-08
+
 ### Added
 
 - **`virtual-mic` feature (macOS, opt-in): the BLE-connected board can now
   surface as a system-level microphone.** Ships a bundled CoreAudio HAL plugin
   (`virtual-mic/`, built by `build.rs` via cmake, vendored
   [libASPL](https://github.com/gavv/libASPL) v3.1.2 under MIT) that registers
-  a 16 kHz mono input device "ReAI Vibe Board", plus a `VirtualMic` `PcmSink`
+  a 16 kHz mono input device "ReAI-Vibe-Board", plus a `VirtualMic` `PcmSink`
   that pumps decoded board PCM into it over loopback UDP. One-time admin
   install via `VirtualMic::ensure_installed()` (copy bundle into
   `/Library/Audio/Plug-Ins/HAL/` + restart coreaudiod). Field-tested end to end
@@ -20,12 +22,22 @@ follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   `AVAudioEngine` readers get silence instead of a prompt, documented as a
   known trap. The feature is off by default and pulls in no new dependencies
   (cmake only needed to build it).
+- **Startup switch**: `BoardConfig { virtual_mic: VirtualMicConfig { enabled,
+  auto_install } }` — the SDK manages the virtual-mic lifecycle (lazy start on
+  the first audio link, parallel delivery alongside any user `PcmSink`,
+  degrade-to-warn on failure). Manual `VirtualMic::start()` +
+  `set_pcm_sink()` stays as the advanced path.
 - Added `examples/virtual_mic_demo.rs` — scan → explicit `connect_ble()` (the
   auto-reconnect path intentionally never connects by name prefix alone) →
   pump BLE audio into the virtual microphone.
 - Added `examples/ble_scan.rs` — unfiltered 15 s advertising scan listing every
   visible peripheral, to tell "board not advertising" and "no Bluetooth
   permission" apart when a connection fails.
+
+## [0.3.1] — 2026-09-03
+
+### Added
+
 - UAC now pairs with the dual-mic stereo firmware (v1.72+, `[L,R]` interleaved
   16 kHz/2ch output). Explicit cpal config selection still prefers 16 kHz/1ch/F32
   but falls back to 2ch before the `default_input_config()` escape hatch, so

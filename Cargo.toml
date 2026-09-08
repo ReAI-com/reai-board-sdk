@@ -3,7 +3,7 @@ members = ["msbc-decoder"]
 
 [package]
 name = "reai-board-sdk"
-version = "0.3.0"
+version = "0.3.2"
 edition = "2021"
 rust-version = "1.87"
 authors = ["ReAI Team"]
@@ -40,7 +40,7 @@ usb = ["dep:hidapi", "dep:cpal", "dep:msbc-decoder"]
 # carries board audio needs the decoder.
 ble = ["dep:btleplug", "dep:futures-util", "dep:msbc-decoder"]
 # macOS virtual microphone (macOS only): registers a system-level input device
-# "ReAI Vibe Board" backed by the bundled CoreAudio HAL plugin in `virtual-mic/`
+# "ReAI-Vibe-Board" backed by the bundled CoreAudio HAL plugin in `virtual-mic/`
 # (built by build.rs via cmake — requires cmake when this feature is enabled),
 # and pumps decoded board PCM into it over loopback UDP. Enable together with
 # `ble`. Consumers of the virtual mic are regular macOS apps and follow normal

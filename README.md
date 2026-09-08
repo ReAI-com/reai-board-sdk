@@ -12,7 +12,7 @@ coding workflows.
 
 [Product site](https://b.reai.com) | [中文文档](README.zh-CN.md) | [API docs (docs.rs)](https://docs.rs/reai-board-sdk) | [Changelog](CHANGELOG.md)
 
-[![ReAI-Vibe-Board](https://raw.githubusercontent.com/ReAI-com/reai-board-sdk/v0.3.0/assets/board-unibody.webp)](https://b.reai.com)
+[![ReAI-Vibe-Board](https://raw.githubusercontent.com/ReAI-com/reai-board-sdk/v0.3.2/assets/board-unibody.webp)](https://b.reai.com)
 
 ---
 
@@ -34,7 +34,7 @@ three for the knob, six for the keys, three for the lever.
 
 | | | |
 |:-:|:-:|:-:|
-| [![Knob](https://raw.githubusercontent.com/ReAI-com/reai-board-sdk/v0.3.0/assets/board-knob.webp)](https://b.reai.com) | [![Dual mic](https://raw.githubusercontent.com/ReAI-com/reai-board-sdk/v0.3.0/assets/board-mic.webp)](https://b.reai.com) | [![Keys](https://raw.githubusercontent.com/ReAI-com/reai-board-sdk/v0.3.0/assets/board-keys.webp)](https://b.reai.com) |
+| [![Knob](https://raw.githubusercontent.com/ReAI-com/reai-board-sdk/v0.3.2/assets/board-knob.webp)](https://b.reai.com) | [![Dual mic](https://raw.githubusercontent.com/ReAI-com/reai-board-sdk/v0.3.2/assets/board-mic.webp)](https://b.reai.com) | [![Keys](https://raw.githubusercontent.com/ReAI-com/reai-board-sdk/v0.3.2/assets/board-keys.webp)](https://b.reai.com) |
 | Metal knob | Dual-mic array | Tactile keys |
 
 ---
@@ -369,7 +369,7 @@ Over BLE the board gets no audio device — the link is a custom GATT service,
 not HFP/A2DP, so the OS Bluetooth stack ignores it. The `virtual-mic` feature
 closes that gap: the SDK ships a CoreAudio HAL plugin (sources under
 `virtual-mic/`, with vendored [libASPL](https://github.com/gavv/libASPL), MIT)
-that registers a 16 kHz mono input device **"ReAI Vibe Board"** and a `VirtualMic`
+that registers a 16 kHz mono input device **"ReAI-Vibe-Board"** and a `VirtualMic`
 `PcmSink` that pumps decoded board PCM into it over loopback UDP. After that,
 System Settings and every app can select the board microphone directly.
 

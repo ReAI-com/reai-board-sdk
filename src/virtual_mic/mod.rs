@@ -3,7 +3,7 @@
 //! BLE 链路是自定义 GATT + mSBC,系统蓝牙栈不会为它创建音频设备(USB 时硬件
 //! 本身是 UAC 声卡,无需本模块)。本模块配合本 crate 附带的 CoreAudio HAL
 //! 插件(源码在 `virtual-mic/`,随 `virtual-mic` feature 由 build.rs 用 cmake
-//! 编译),在系统中注册一个 16 kHz 单声道的输入设备 **"ReAI Vibe Board"**,
+//! 编译),在系统中注册一个 16 kHz 单声道的输入设备 **"ReAI-Vibe-Board"**,
 //! 并把 [`PcmSink`] 收到的解码 PCM 通过 UDP 泵给它——此后系统设置与任意
 //! App 都能直接选中该"麦克风"。
 //!
@@ -36,7 +36,7 @@
 //! }
 //!
 //! // start 后作为 PcmSink 交给 BoardDevice::set_pcm_sink(mic),
-//! // BLE 连接并 start_board_audio 后系统即可从 "ReAI Vibe Board" 录音
+//! // BLE 连接并 start_board_audio 后系统即可从 "ReAI-Vibe-Board" 录音
 //! let mic = Arc::new(VirtualMic::start()?);
 //! # let _ = mic; // 完整接线见 examples/virtual_mic_demo.rs
 //! # Ok(())
@@ -67,7 +67,7 @@ use crate::kernel::error::{BoardError, Result};
 use crate::kernel::sink::PcmSink;
 
 /// 设备在系统声音设置中呈现的名称。
-pub const DEVICE_NAME: &str = "ReAI Vibe Board";
+pub const DEVICE_NAME: &str = "ReAI-Vibe-Board";
 
 /// HAL 插件 bundle 文件名(安装到 `/Library/Audio/Plug-Ins/HAL/` 下)。
 pub const DRIVER_BUNDLE_NAME: &str = "ReAIVibeBoard.driver";
@@ -162,7 +162,7 @@ impl VirtualMic {
         Ok(())
     }
 
-    /// 卸载驱动(需要管理员授权)。卸载后 "ReAI Vibe Board" 从系统消失。
+    /// 卸载驱动(需要管理员授权)。卸载后 "ReAI-Vibe-Board" 从系统消失。
     pub fn uninstall() -> Result<()> {
         let dest = Self::installed_driver_path();
         let script = format!("rm -rf '{dest}' && killall coreaudiod", dest = dest.display());

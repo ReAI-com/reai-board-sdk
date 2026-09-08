@@ -38,7 +38,17 @@ deny_fixed() {
   fi
 }
 
-require_fixed 'version = "0.3.0"' Cargo.toml 'crate version is 0.3.0'
+# The expected version is derived from Cargo.toml so the check survives
+# releases without editing this script.
+version=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)
+if [[ -z "$version" ]]; then
+  fail 'crate version readable from Cargo.toml'
+  version='0.0.0'
+else
+  pass "crate version is $version"
+fi
+
+require_fixed "version = \"$version\"" Cargo.toml 'Cargo.toml version matches derived version'
 require_fixed 'default = ["usb", "ble"]' Cargo.toml 'default features exclude test-mode'
 require_fixed '[package.metadata.docs.rs]' Cargo.toml 'docs.rs package metadata exists'
 require_fixed 'all-features = true' Cargo.toml 'docs.rs builds opt-in APIs'
@@ -46,8 +56,8 @@ require_fixed 'reai-board-sdk = "0.3"' README.md 'English quick start uses 0.3'
 require_fixed 'reai-board-sdk = "0.3"' README.zh-CN.md 'Chinese quick start uses 0.3'
 require_fixed '`test-mode` is opt-in' README.md 'English README explains opt-in test-mode'
 require_fixed 'test-mode` 默认不启用' README.zh-CN.md 'Chinese README explains opt-in test-mode'
-require_fixed '/v0.3.0/assets/' README.md 'English assets use immutable v0.3.0 tag'
-require_fixed '/v0.3.0/assets/' README.zh-CN.md 'Chinese assets use immutable v0.3.0 tag'
+require_fixed "/v${version}/assets/" README.md "English assets use immutable v${version} tag"
+require_fixed "/v${version}/assets/" README.zh-CN.md "Chinese assets use immutable v${version} tag"
 
 deny_fixed \
   'ReAI Vibe Board' \

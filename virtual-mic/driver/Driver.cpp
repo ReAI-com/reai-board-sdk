@@ -1,4 +1,4 @@
-// ReAI Vibe Board virtual microphone driver.
+// ReAI-Vibe-Board virtual microphone driver.
 //
 // Input-only 16 kHz mono CoreAudio device. PCM samples arrive as UDP
 // datagrams (native-endian SInt16) on 127.0.0.1:47160 from a user process
@@ -174,7 +174,7 @@ std::shared_ptr<aspl::Driver> CreateDriver()
     auto context = std::make_shared<aspl::Context>();
 
     aspl::DeviceParameters params;
-    params.Name = "ReAI Vibe Board";
+    params.Name = "ReAI-Vibe-Board";
     params.Manufacturer = "ReAI";
     params.SampleRate = kSampleRate;
     params.ChannelCount = 1;

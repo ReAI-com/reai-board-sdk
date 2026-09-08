@@ -28,7 +28,7 @@ use super::events::{EventStream, EventStreamError};
 pub struct BoardConfig {
     pub hotplug: HotplugConfig,
     /// macOS（`virtual-mic` feature）：启动开关——把板子音频暴露为系统级
-    /// 麦克风 "ReAI Vibe Board"。默认关闭。见 [`crate::virtual_mic::VirtualMicConfig`]。
+    /// 麦克风 "ReAI-Vibe-Board"。默认关闭。见 [`crate::virtual_mic::VirtualMicConfig`]。
     #[cfg(all(feature = "virtual-mic", target_os = "macos"))]
     pub virtual_mic: crate::virtual_mic::VirtualMicConfig,
 }
