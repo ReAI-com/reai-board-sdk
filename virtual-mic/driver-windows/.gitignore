@@ -1,0 +1,8 @@
+# MSBuild/WDK build outputs (never commit build artifacts)
+[xX]64/
+[Aa][Rr][Mm]64/
+[Bb]in/
+[Oo]bj/
+[Dd]ebug/
+[Rr]elease/
+out/

@@ -193,7 +193,7 @@ device state. See [Security notes](#security-notes).
 |--------------------|----------------------------------------------------------|----------|
 | `usb`              | `hidapi 2.6` (USB HID) + `cpal 0.15` (USB Audio capture) + `msbc-decoder` | ✅       |
 | `ble`              | `btleplug 0.12` (BLE GATT) + `futures-util` + `msbc-decoder` | ✅       |
-| `virtual-mic`      | no new deps (macOS only; needs `cmake` at build time)    | ❌       |
+| `virtual-mic`      | no new deps (macOS needs `cmake` at build time; Windows needs a WDK-built driver package at runtime) | ❌       |
 | `test-mode`        | Factory test commands (e.g. `shutdown_device(0x5E)`)     | ❌       |
 
 Board audio is mSBC on every transport, so both transport features pull in the
@@ -363,7 +363,7 @@ Samples buffer in memory (~128 KB/s) and are written once on stop — fine for
 short captures, not for hour-long recordings. Legacy mono firmware keeps
 working unchanged. See `examples/uac_capture.rs`.
 
-### Virtual microphone (macOS, `virtual-mic`)
+### Virtual microphone (macOS / Windows, `virtual-mic`)
 
 Over BLE the board gets no audio device — the link is a custom GATT service,
 not HFP/A2DP, so the OS Bluetooth stack ignores it. The `virtual-mic` feature
@@ -429,6 +429,41 @@ Notes (all verified on macOS 26):
   prefix (avoids grabbing the wrong board in multi-device environments): call
   `scan_ble_devices()` then `connect_ble(name)` — see
   `examples/virtual_mic_demo.rs` for the full flow.
+
+**Windows (development mode):** Windows has no user-mode virtual-audio API, so
+the board microphone rides on a small kernel driver derived from Microsoft's
+MIT-licensed [SimpleAudioSample](https://github.com/microsoft/Windows-driver-samples/tree/main/audio/simpleaudiosample)
+(PortCls/WaveRT): a capture-only 16 kHz mono endpoint named **"ReAI-Vibe-Board"**,
+fed by user-mode writes to the control device `\\.\ReAIVibeBoardVirtualMic`
+(the Windows `VirtualMic` writes there instead of UDP; inside the driver a
+bounded ring turns underflow into silence and drops — never buffers — on
+overflow). The same `VirtualMicConfig` switch, `ensure_installed()` /
+`start()` API and `PcmSink` contract apply unchanged.
+
+Notes for Windows:
+
+- The driver lives in `virtual-mic/driver-windows/` and must be built with the
+  Windows Driver Kit: `scripts/build-driver-windows.ps1 -TestSign` locally, or
+  grab the test-signed artifact from the repo's `driver-windows` CI workflow.
+- Point `REAI_VIRTUAL_MIC_DRIVER_DIR` at the package directory (`.inf` + `.cat`
+  + `.sys` together). `VirtualMic::ensure_installed()` runs
+  `pnputil /add-driver <inf> /install` elevated (UAC prompt). Unloading again:
+  `VirtualMic::uninstall()`.
+- Loading a **test-signed** build additionally requires test signing mode
+  (`bcdedit /set TESTSIGNING ON` + reboot) and importing the generated
+  `testsign.cer` into Trusted Root + Trusted Publishers. Creating certificates
+  and signing binaries is deliberately not done by the SDK. Production
+  distribution needs EV code-signing plus Microsoft Partner Center attestation
+  signing — tracked as a separate phase of issue #11.
+- 16 kHz mono is the device's native rate; the Windows audio engine resamples
+  for apps. Quality ceiling is the same BLE mSBC constraint as on macOS.
+- In sound settings and device pickers the endpoint shows as
+  **"麦克风阵列 (ReAI-Vibe-Board)"** (Windows prefixes the localized node
+  category); match by the `ReAI-Vibe-Board` substring, same as on macOS.
+- Windows flips install-time default-device policy slightly: check
+  `Settings → System → Sound → Input` after the first install and pick the
+  mic you actually want as default; the driver cannot suppress default-device
+  candidacy the way the macOS build does.
 
 ---
 

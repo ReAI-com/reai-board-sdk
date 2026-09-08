@@ -171,7 +171,7 @@ SDK **不模拟、不注入键盘输入**，它只读设备上报并向设备发
 |--------------------|-------------------------------------------------------|--------|
 | `usb`              | `hidapi 2.6`（USB HID）+ `cpal 0.15`（USB Audio 采集）+ `msbc-decoder` | ✅     |
 | `ble`              | `btleplug 0.12`（BLE GATT）+ `futures-util` + `msbc-decoder` | ✅     |
-| `virtual-mic`      | 无新依赖（仅 macOS；构建需 `cmake`）                   | ❌     |
+| `virtual-mic`      | 无新依赖（macOS 构建需 `cmake`；Windows 运行时需 WDK 驱动包） | ❌     |
 | `test-mode`        | 工厂测试命令（如 `shutdown_device(0x5E)`）            | ❌     |
 
 板载音频在每条传输上都是 mSBC，所以两个传输 feature 都会引入 `msbc-decoder`
@@ -328,7 +328,7 @@ device.stop_local_audio_reader(); // 触发原始 WAV 落盘
 样本驻留内存（约 128 KB/s），stop 时一次性写入——适合短采集，不要用于超长
 录制。旧单声道固件行为完全不变。见 `examples/uac_capture.rs`。
 
-### 虚拟麦克风（macOS，`virtual-mic`）
+### 虚拟麦克风（macOS / Windows，`virtual-mic`）
 
 BLE 连接时系统不会为板子创建音频设备——BLE 走的是自定义 GATT，不是 HFP/A2DP，
 系统蓝牙栈不认得它。`virtual-mic` feature 补上这最后一环：SDK 附带一个 CoreAudio
@@ -384,6 +384,36 @@ device.set_pcm_sink(Arc::new(VirtualMic::start()?));
 - 纯 BLE 场景下 SDK 的自动连接**故意**不按名字前缀盲连（防多板误连），需先
   `scan_ble_devices()` 发现、再 `connect_ble(name)` 显式连接——完整流程见
   `examples/virtual_mic_demo.rs`。
+
+**Windows（开发模式）**：Windows 没有用户态虚拟音频 API，板子麦克风走一个小型
+内核驱动，派生自微软 MIT 许可的
+[SimpleAudioSample](https://github.com/microsoft/Windows-driver-samples/tree/main/audio/simpleaudiosample)
+（PortCls/WaveRT）：一个 16 kHz mono 纯采集端点 **"ReAI-Vibe-Board"**，由用户态
+向控制设备 `\\.\ReAIVibeBoardVirtualMic` 写 PCM 喂数据（Windows 的 `VirtualMic`
+从 UDP 换成了这里；驱动内部是一个有界环形缓冲——欠载补静音、满时丢弃新数据，
+绝不积攒延迟）。`VirtualMicConfig` 开关、`ensure_installed()` / `start()` API
+与 `PcmSink` 合同与 macOS 完全一致。
+
+Windows 注意事项：
+
+- 驱动源码在 `virtual-mic/driver-windows/`，必须用 WDK 构建：本机跑
+  `scripts/build-driver-windows.ps1 -TestSign`，或直接取仓库 `driver-windows`
+  CI workflow 产出的测试签名 artifact。
+- 把 `REAI_VIRTUAL_MIC_DRIVER_DIR` 指向驱动包目录（`.inf` + `.cat` + `.sys`
+  同目录）。`VirtualMic::ensure_installed()` 会提权跑
+  `pnputil /add-driver <inf> /install`（弹 UAC）。卸载用
+  `VirtualMic::uninstall()`。
+- 加载**测试签名**的驱动还需开启测试签名模式（`bcdedit /set TESTSIGNING ON`
+  并重启）并导入生成的 `testsign.cer` 到受信任根 + 受信任的发布者。SDK 刻意
+  不代创建证书、不代签二进制。对外分发需要 EV 代码签名 + 微软 Partner Center
+  证明签名——属 issue #11 的独立二期。
+- 设备原生 16 kHz mono，App 的采样率需求由 Windows 音频引擎自动重采样；音质
+  上限与 macOS 相同，由 BLE mSBC 带宽决定。
+- 声音设置和设备选择器里端点显示为 **「麦克风阵列 (ReAI-Vibe-Board)」**
+  （Windows 会自动加节点类别前缀）；与 macOS 一致，按 `ReAI-Vibe-Board`
+  子串匹配即可。
+- 安装后到 `设置 → 系统 → 声音 → 输入` 检查默认输入设备；Windows 侧驱动无法
+  像 macOS 那样声明不参与默认设备竞选，留意首次安装是否抢了默认麦克风。
 
 ---
 

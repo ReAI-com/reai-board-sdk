@@ -16,8 +16,9 @@ readme = "README.md"
 # crates.io 上限 5 个 keywords
 keywords = ["keyboard", "hid", "ble", "usb", "hardware"]
 categories = ["api-bindings", "hardware-support"]
-# 产品配图仅用于 GitHub / crates.io 页面展示，不进 crate 包
-exclude = ["assets/*", "flutter/**", "plans/**"]
+# 产品配图仅用于 GitHub / crates.io 页面展示，不进 crate 包；
+# Windows 虚拟麦克风驱动是独立 WDK 工程，产物随发布 artifact 走，不进 crate 包
+exclude = ["assets/*", "flutter/**", "plans/**", "virtual-mic/driver-windows/**"]
 
 [package.metadata.docs.rs]
 all-features = true
@@ -39,12 +40,9 @@ usb = ["dep:hidapi", "dep:cpal", "dep:msbc-decoder"]
 # The rest of this crate is MIT. See the `usb` note above — any transport that
 # carries board audio needs the decoder.
 ble = ["dep:btleplug", "dep:futures-util", "dep:msbc-decoder"]
-# macOS virtual microphone (macOS only): registers a system-level input device
-# "ReAI-Vibe-Board" backed by the bundled CoreAudio HAL plugin in `virtual-mic/`
-# (built by build.rs via cmake — requires cmake when this feature is enabled),
-# and pumps decoded board PCM into it over loopback UDP. Enable together with
-# `ble`. Consumers of the virtual mic are regular macOS apps and follow normal
-# microphone-permission (TCC) rules.
+# System-level virtual microphone (macOS / Windows), off by default. macOS
+# builds the bundled CoreAudio HAL plugin; Windows consumes a developer-built,
+# test-signed WDK driver package. Enable together with `ble`.
 virtual-mic = []
 # Factory test commands (e.g. shutdown 0x5E)
 test-mode = []
@@ -91,3 +89,7 @@ required-features = ["ble", "virtual-mic"]
 [[example]]
 name = "ble_scan"
 required-features = ["ble"]
+
+[[example]]
+name = "virtual_mic_loopback"
+required-features = ["usb", "virtual-mic"]

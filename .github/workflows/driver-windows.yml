@@ -1,0 +1,112 @@
+# Builds the Windows virtual-microphone driver package (test-signed) so the
+# `virtual-mic` Rust backend has a real `REAI_VIRTUAL_MIC_DRIVER_DIR` payload.
+#
+# Runs on windows-2022 because the WDK is preinstalled there; windows-2025
+# images dropped it (actions/runner-images#13071). Move to the WDK NuGet /
+# winget install once VS 2026 images regain driver tooling support.
+name: driver-windows
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - "virtual-mic/driver-windows/**"
+      - ".github/workflows/driver-windows.yml"
+  pull_request:
+    branches: [main]
+    paths:
+      - "virtual-mic/driver-windows/**"
+      - ".github/workflows/driver-windows.yml"
+
+env:
+  WDK_VERSION: 10.0.22621.0
+
+jobs:
+  build:
+    name: build (${{ matrix.platform }})
+    runs-on: windows-2022
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: x64
+            # x64 passes ApiValidator on the runner.
+            apivalidator: "true"
+          - platform: ARM64
+            # The runner's x86 aitstatic cannot validate ARM64 binaries
+            # (exit 193); keep the build, skip the API check.
+            apivalidator: "false"
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Verify WDK presence
+        shell: pwsh
+        run: |
+          $wdk = "C:\Program Files (x86)\Windows Kits\10"
+          if (-not (Test-Path (Join-Path $wdk "Include"))) {
+            throw "WDK missing on runner image; install Microsoft.WindowsWDK.$env:WDK_VERSION"
+          }
+          Write-Host "WDK found at $wdk"
+
+      - name: Locate MSBuild
+        shell: pwsh
+        run: |
+          $vswhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
+          $msbuild = & $vswhere -latest -products * `
+            -find MSBuild\**\Bin\MSBuild.exe | Select-Object -First 1
+          if (-not $msbuild) { throw "MSBuild not found" }
+          Add-Content $env:GITHUB_PATH (Split-Path $msbuild)
+          Write-Host "MSBuild: $msbuild"
+
+      - name: Build driver package
+        shell: pwsh
+        run: |
+          # SkipPackageVerification: the packaged InfVerif task wants bin\x86\infverif.dll,
+          # which some WDK installs lack; inf2cat's signability test still runs.
+          msbuild virtual-mic/driver-windows/ReAIVibeBoardVirtualMic.sln `
+            /m /p:Configuration=Release /p:Platform=${{ matrix.platform }} /p:SignMode=Off `
+            /p:SkipPackageVerification=true /p:ApiValidator_Enable=${{ matrix.apivalidator }}
+
+      - name: Create test certificate and sign package
+        shell: pwsh
+        run: |
+          $wdk = "C:\Program Files (x86)\Windows Kits\10"
+          $signtool = Get-ChildItem -Path (Join-Path $wdk "bin") -Recurse -Filter signtool.exe |
+            Where-Object { $_.FullName -match "x64" } | Select-Object -First 1
+
+          $cert = New-SelfSignedCertificate -Type CodeSigningCert `
+            -Subject "CN=ReAI Vibe Board Virtual Mic (Test)" `
+            -KeyUsage DigitalSignature -CertStoreLocation "Cert:\CurrentUser\My"
+          $pfx = Join-Path $env:RUNNER_TEMP "testsign.pfx"
+          Export-PfxCertificate -Cert $cert -FilePath $pfx `
+            -Password (ConvertTo-SecureString "reai-vbm" -Force -AsPlainText) | Out-Null
+
+          $out = "virtual-mic/driver-windows/out/Release-${{ matrix.platform }}"
+          New-Item -ItemType Directory -Force -Path $out | Out-Null
+
+          # Sign .sys and .cat only — the .inf is covered by the catalog's
+          # signature; signtool refuses raw INF files.
+          foreach ($name in @("ReAIVibeBoardVirtualMic.sys","ReAIVibeBoardVirtualMic.cat")) {
+            $file = Get-ChildItem -Path "virtual-mic/driver-windows" -Recurse -Filter $name |
+              Where-Object { $_.FullName -match '\\package\\' -and $_.FullName -notmatch 'out' } |
+              Select-Object -First 1
+            if (-not $file) { throw "built package file not found: $name" }
+            & $signtool.FullName sign /f $pfx /p "reai-vbm" /fd SHA256 $file.FullName
+            if ($LASTEXITCODE -ne 0) { throw "signtool failed for $($file.FullName)" }
+            Copy-Item $file.FullName $out -Force
+          }
+
+          $infFile = Get-ChildItem -Path "virtual-mic/driver-windows" -Recurse -Filter "ReAIVibeBoardVirtualMic.inf" |
+            Where-Object { $_.FullName -match '\\package\\' -and $_.FullName -notmatch 'out' } |
+            Select-Object -First 1
+          if (-not $infFile) { throw "built INF not found" }
+          Copy-Item $infFile.FullName $out -Force
+
+          Export-Certificate -Cert $cert -FilePath (Join-Path $out "testsign.cer") | Out-Null
+
+      - name: Upload driver package
+        uses: actions/upload-artifact@v4
+        with:
+          name: reai-vibe-board-virtual-mic-${{ matrix.platform }}
+          path: virtual-mic/driver-windows/out/Release-${{ matrix.platform }}/

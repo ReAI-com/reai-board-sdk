@@ -39,16 +39,18 @@ async fn main() {
                 .unwrap_or_default();
             if name.is_empty() {
                 anonymous += 1;
-            } else if named.insert(name.clone()) {
-                if name.starts_with("REAI_VB_") {
-                    println!("  {}  <== 找到 ReAI 板子!", name);
-                }
+            } else if named.insert(name.clone()) && name.starts_with("REAI_VB_") {
+                println!("  {}  <== 找到 ReAI 板子!", name);
             }
         }
     }
     adapter.stop_scan().await.ok();
 
-    println!("扫描结束,共 {} 个具名设备(+ {} 个无名广播):", named.len(), anonymous);
+    println!(
+        "扫描结束,共 {} 个具名设备(+ {} 个无名广播):",
+        named.len(),
+        anonymous
+    );
     for name in &named {
         println!("  {}", name);
     }
