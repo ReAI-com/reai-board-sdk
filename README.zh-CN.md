@@ -409,6 +409,9 @@ Windows 注意事项：
   证明签名——属 issue #11 的独立二期。
 - 设备原生 16 kHz mono，App 的采样率需求由 Windows 音频引擎自动重采样；音质
   上限与 macOS 相同，由 BLE mSBC 带宽决定。
+- 声音设置和设备选择器里端点显示为 **「麦克风阵列 (ReAI-Vibe-Board)」**
+  （Windows 会自动加节点类别前缀）；与 macOS 一致，按 `ReAI-Vibe-Board`
+  子串匹配即可。
 - 安装后到 `设置 → 系统 → 声音 → 输入` 检查默认输入设备；Windows 侧驱动无法
   像 macOS 那样声明不参与默认设备竞选，留意首次安装是否抢了默认麦克风。
 

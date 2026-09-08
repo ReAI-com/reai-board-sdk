@@ -65,6 +65,11 @@ HKR,,FriendlyName,,%REAIVBMIC.TopologyMicArray1.szPname%
 
 HKR,EP\0,%PKEY_AudioEndpoint_Association%,,%KSNODETYPE_ANY%
 
+; Override the endpoint friendly name so apps and sound settings see exactly
+; "ReAI-Vibe-Board" (the SDK's virtual_mic::DEVICE_NAME) instead of the
+; default "<category> (<device description>)" composition.
+HKR,EP\0,%PKEY_Device_FriendlyName%,,%REAIVBMIC.Endpoint.szName%
+
 ; The following lines opt-in to pull mode.
 HKR,EP\0,%PKEY_AudioEndpoint_Supports_EventDriven_Mode%,0x00010001,0x1
 
@@ -136,17 +141,19 @@ KSNODETYPE_ANY   = "{00000000-0000-0000-0000-000000000000}"
 
 PKEY_AudioEndpoint_Association               = "{1DA5D803-D492-4EDD-8C23-E0C0FFEE7F0E},2"
 PKEY_AudioEndpoint_Supports_EventDriven_Mode = "{1DA5D803-D492-4EDD-8C23-E0C0FFEE7F0E},7"
+PKEY_Device_FriendlyName                     = "{a45c254e-df1c-4efd-8020-67d146a850e0},14"
 
 ;Localizable
 
 ProviderName = "ReAI"
 MfgName      = "ReAI"
 
-REAIVBMIC_SA.DeviceDesc="ReAI-Vibe-Board Virtual Microphone (WDM)"
+REAIVBMIC_SA.DeviceDesc="ReAI-Vibe-Board"
 REAIVBMIC.SvcDesc="ReAI-Vibe-Board Virtual Microphone Driver"
 
 ;; friendly names (what apps see in sound settings / device pickers)
 REAIVBMIC.WaveMicArray1.szPname="ReAI-Vibe-Board"
 REAIVBMIC.TopologyMicArray1.szPname="ReAI-Vibe-Board"
+REAIVBMIC.Endpoint.szName="ReAI-Vibe-Board"
 
 MicArray1CustomName= "ReAI-Vibe-Board"

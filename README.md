@@ -457,6 +457,9 @@ Notes for Windows:
   signing — tracked as a separate phase of issue #11.
 - 16 kHz mono is the device's native rate; the Windows audio engine resamples
   for apps. Quality ceiling is the same BLE mSBC constraint as on macOS.
+- In sound settings and device pickers the endpoint shows as
+  **"麦克风阵列 (ReAI-Vibe-Board)"** (Windows prefixes the localized node
+  category); match by the `ReAI-Vibe-Board` substring, same as on macOS.
 - Windows flips install-time default-device policy slightly: check
   `Settings → System → Sound → Input` after the first install and pick the
   mic you actually want as default; the driver cannot suppress default-device
