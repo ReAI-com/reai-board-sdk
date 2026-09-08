@@ -335,14 +335,33 @@ BLE 连接时系统不会为板子创建音频设备——BLE 走的是自定义
 HAL 插件（源码在 `virtual-mic/`，内嵌 vendored
 [libASPL](https://github.com/gavv/libASPL)，MIT），在系统中注册 16 kHz mono
 输入设备 **"ReAI Vibe Board"**，并把 `PcmSink` 收到的 PCM 经回环 UDP 泵进去。
-之后系统设置与任意 App 都能直接选用板子麦克风：
+之后系统设置与任意 App 都能直接选用板子麦克风。
+
+**启动开关**（推荐）：在 `BoardConfig` 里打开，SDK 自管生命周期；与自设的
+`PcmSink` 并行投递，互不影响：
+
+```rust
+use reai_board_sdk::virtual_mic::VirtualMicConfig;
+
+let device = BoardDevice::open(BoardConfig {
+    virtual_mic: VirtualMicConfig {
+        enabled: true,
+        // 驱动未安装时自动请求安装(弹管理员密码框);false 则仅告警跳过
+        auto_install: true,
+    },
+    ..Default::default()
+})?;
+device.start().await?;
+```
+
+也可以手工接管（`auto_install: false` 或完全绕开开关）：
 
 ```rust
 use std::sync::Arc;
 use reai_board_sdk::virtual_mic::VirtualMic;
 
 if !VirtualMic::is_installed() {
-    VirtualMic::ensure_installed()?;   // 一次性；弹管理员密码框
+    VirtualMic::ensure_installed()?;   // 一次性;弹管理员密码框
 }
 device.set_pcm_sink(Arc::new(VirtualMic::start()?));
 ```

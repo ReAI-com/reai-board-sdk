@@ -9,6 +9,22 @@
 //!
 //! # 典型用法
 //!
+//! 启动开关（推荐,SDK 自管生命周期,失败只降级）:
+//!
+//! ```no_run
+//! use reai_board_sdk::{BoardConfig, virtual_mic::VirtualMicConfig};
+//!
+//! # fn main() -> anyhow::Result<()> {
+//! let device = BoardDevice::open(BoardConfig {
+//!     virtual_mic: VirtualMicConfig { enabled: true, auto_install: true },
+//!     ..Default::default()
+//! })?;
+//! # Ok(())
+//! # }
+//! ```
+//!
+//! 手工接管（等价,自行控制安装与启停）:
+//!
 //! ```no_run
 //! use std::sync::Arc;
 //! use reai_board_sdk::virtual_mic::VirtualMic;
@@ -67,6 +83,29 @@ fn bundled_driver_path() -> PathBuf {
         return PathBuf::from(path);
     }
     PathBuf::from(env!("REAI_VIRTUAL_MIC_DRIVER"))
+}
+
+/// 虚拟麦克风启动开关（放 [`crate::BoardConfig::virtual_mic`]）。
+///
+/// 默认关闭。`enabled = true` 时，`start()` 后首次建立音频链路即生效：
+/// SDK 自动创建发送端并把解码 PCM 并入系统设备（与用户自设的 `PcmSink`
+/// 并行投递，互不影响）。失败只降级（告警 + 停用），不影响其他功能。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct VirtualMicConfig {
+    /// 启用虚拟麦克风。
+    pub enabled: bool,
+    /// 驱动未安装时自动请求安装（弹管理员密码框）。
+    /// `false` 时仅告警并跳过，由调用方自行调 [`VirtualMic::ensure_installed`]。
+    pub auto_install: bool,
+}
+
+impl Default for VirtualMicConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            auto_install: false,
+        }
+    }
 }
 
 /// 虚拟麦克风发送端:实现 [`PcmSink`],把解码 PCM 泵入系统设备。

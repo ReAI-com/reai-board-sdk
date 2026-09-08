@@ -18,7 +18,7 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use reai_board_sdk::sink::PcmSink;
-use reai_board_sdk::virtual_mic::VirtualMic;
+use reai_board_sdk::virtual_mic::VirtualMicConfig;
 use reai_board_sdk::{
     AudioStreamAction, AudioStreamScope, AudioTransport, BoardConfig, BoardDevice, BoardEvent,
 };
@@ -29,20 +29,19 @@ async fn main() {
         .format_timestamp_millis()
         .init();
 
-    // 驱动安装(一次性;重复执行=覆盖升级)
-    if !VirtualMic::is_installed() {
-        println!("虚拟麦克风驱动未安装,请求管理员授权安装(请留意系统密码框)...");
-        VirtualMic::ensure_installed().expect("驱动安装失败");
-        println!("驱动安装完成。");
-    } else {
-        println!("虚拟麦克风驱动已安装({})。", VirtualMic::installed_driver_path().display());
-    }
+    println!("打开 BoardDevice(虚拟麦克风经启动开关开启)...");
+    // 启动开关:auto_install=true 会在驱动缺失时请求安装(弹管理员密码框)。
+    // 首次音频链路建立时 SDK 自动启用;与下方 set_pcm_sink 的 MeteredSink 并行投递。
+    let device = BoardDevice::open(BoardConfig {
+        virtual_mic: VirtualMicConfig {
+            enabled: true,
+            auto_install: true,
+        },
+        ..Default::default()
+    })
+    .expect("open 失败");
 
-    println!("打开 BoardDevice(tokio 内核)...");
-    let device = BoardDevice::open(BoardConfig::default()).expect("open 失败");
-
-    let mic = Arc::new(VirtualMic::start().expect("VirtualMic 启动失败"));
-    device.set_pcm_sink(Arc::new(MeteredSink::new(mic)));
+    device.set_pcm_sink(Arc::new(MeteredSink::new()));
 
     println!("start(首次 BLE 可能等 CoreBluetooth adapter 预热 ~40s)...");
     device.start().await.expect("start 失败");
@@ -150,17 +149,16 @@ fn print_event(evt: &BoardEvent) {
     }
 }
 
-/// 转发 sink:PCM 直通虚拟麦克风,每秒打印一次统计(实地测试时可观察数据流)。
+/// 转发 sink:每秒打印一次统计(实地测试时可观察数据流)。
+/// 虚拟麦克风由 BoardConfig 启动开关投递,不经过这里。
 struct MeteredSink {
-    inner: Arc<VirtualMic>,
     samples: AtomicU64,
     last: Mutex<Instant>,
 }
 
 impl MeteredSink {
-    fn new(inner: Arc<VirtualMic>) -> Self {
+    fn new() -> Self {
         Self {
-            inner,
             samples: AtomicU64::new(0),
             last: Mutex::new(Instant::now()),
         }
@@ -169,7 +167,6 @@ impl MeteredSink {
 
 impl PcmSink for MeteredSink {
     fn on_pcm(&self, samples: &[f32]) {
-        self.inner.on_pcm(samples);
         let total = self
             .samples
             .fetch_add(samples.len() as u64, Ordering::Relaxed);

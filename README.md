@@ -371,7 +371,28 @@ closes that gap: the SDK ships a CoreAudio HAL plugin (sources under
 `virtual-mic/`, with vendored [libASPL](https://github.com/gavv/libASPL), MIT)
 that registers a 16 kHz mono input device **"ReAI Vibe Board"** and a `VirtualMic`
 `PcmSink` that pumps decoded board PCM into it over loopback UDP. After that,
-System Settings and every app can select the board microphone directly:
+System Settings and every app can select the board microphone directly.
+
+**Startup switch** (recommended): flip it in `BoardConfig` and the SDK manages
+the lifecycle; PCM is delivered in parallel with any `PcmSink` you set yourself:
+
+```rust
+use reai_board_sdk::virtual_mic::VirtualMicConfig;
+
+let device = BoardDevice::open(BoardConfig {
+    virtual_mic: VirtualMicConfig {
+        enabled: true,
+        // request install (admin prompt) when the driver is missing;
+        // false = warn and skip, install yourself via VirtualMic::ensure_installed()
+        auto_install: true,
+    },
+    ..Default::default()
+})?;
+device.start().await?;
+```
+
+Or take manual control instead (`auto_install: false`, or skip the switch
+entirely):
 
 ```rust
 use std::sync::Arc;

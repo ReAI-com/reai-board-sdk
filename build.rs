@@ -29,17 +29,18 @@ fn main() {
 
     // The SDK ships the driver ad-hoc signed (enough to load, see the
     // virtual-mic docs). Product developers distributing it sign it with
-    // their own Developer ID certificate via this variable.
+    // their own Developer ID certificate via this variable. Always pass the
+    // variable explicitly (empty default) — CMake cache variables persist
+    // across reconfigures, so omitting it would silently keep a stale ID.
     let mut configure_args = vec![
         String::from("-S"),
         driver_src.display().to_string(),
         String::from("-B"),
         build_dir.display().to_string(),
         String::from("-DCMAKE_BUILD_TYPE=Release"),
+        String::from("-DCODESIGN_ID="),
     ];
-    if let Ok(codesign_id) = env::var("REAI_VIRTUAL_MIC_CODESIGN_ID") {
-        configure_args.push(format!("-DCODESIGN_ID={codesign_id}"));
-    }
+    configure_args[5].push_str(&env::var("REAI_VIRTUAL_MIC_CODESIGN_ID").unwrap_or_default());
 
     let status = Command::new("cmake")
         .args(&configure_args)

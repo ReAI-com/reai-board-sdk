@@ -43,7 +43,7 @@ pub mod facade;
 
 // macOS virtual microphone: exposes the board as a system-level input device
 // when connected over BLE. Feature-gated (off by default); macOS-only.
-#[cfg(all(feature = "virtual-mic", feature = "ble", target_os = "macos"))]
+#[cfg(all(feature = "virtual-mic", target_os = "macos"))]
 pub mod virtual_mic;
 
 // ============ Top-level re-exports ============
