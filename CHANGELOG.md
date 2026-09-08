@@ -26,6 +26,9 @@ follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   whole SDK now compile and test on `windows-latest`, and new contract tests
   guard that the Rust backend and the driver's INF / device names cannot drift
   apart.
+- Added `examples/virtual_mic_loopback.rs` — driver-only loopback self-test
+  (no board needed): feeds a sine into the control device, captures from the
+  system endpoint, asserts non-silence, writes a WAV for ear-checking.
 
 ## [0.3.2] — 2026-09-08
 
