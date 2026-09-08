@@ -193,6 +193,7 @@ device state. See [Security notes](#security-notes).
 |--------------------|----------------------------------------------------------|----------|
 | `usb`              | `hidapi 2.6` (USB HID) + `cpal 0.15` (USB Audio capture) + `msbc-decoder` | ✅       |
 | `ble`              | `btleplug 0.12` (BLE GATT) + `futures-util` + `msbc-decoder` | ✅       |
+| `virtual-mic`      | no new deps (macOS only; needs `cmake` at build time)    | ❌       |
 | `test-mode`        | Factory test commands (e.g. `shutdown_device(0x5E)`)     | ❌       |
 
 Board audio is mSBC on every transport, so both transport features pull in the
@@ -362,6 +363,46 @@ Samples buffer in memory (~128 KB/s) and are written once on stop — fine for
 short captures, not for hour-long recordings. Legacy mono firmware keeps
 working unchanged. See `examples/uac_capture.rs`.
 
+### Virtual microphone (macOS, `virtual-mic`)
+
+Over BLE the board gets no audio device — the link is a custom GATT service,
+not HFP/A2DP, so the OS Bluetooth stack ignores it. The `virtual-mic` feature
+closes that gap: the SDK ships a CoreAudio HAL plugin (sources under
+`virtual-mic/`, with vendored [libASPL](https://github.com/gavv/libASPL), MIT)
+that registers a 16 kHz mono input device **"ReAI Vibe Board"** and a `VirtualMic`
+`PcmSink` that pumps decoded board PCM into it over loopback UDP. After that,
+System Settings and every app can select the board microphone directly:
+
+```rust
+use std::sync::Arc;
+use reai_board_sdk::virtual_mic::VirtualMic;
+
+if !VirtualMic::is_installed() {
+    VirtualMic::ensure_installed()?;   // one-time; shows an admin password prompt
+}
+device.set_pcm_sink(Arc::new(VirtualMic::start()?));
+```
+
+Notes (all verified on macOS 26):
+
+- Building the feature requires `cmake` (`brew install cmake`); the driver is a
+  universal arm64 + x86_64 binary. The feature is off by default and does not
+  affect other users' builds.
+- Install happens once (copies the bundle into `/Library/Audio/Plug-Ins/HAL/`
+  and restarts coreaudiod); BLE reconnects need no reinstall, and the device
+  presents silence while nothing is pumped.
+- **Apps reading the device follow the normal macOS microphone-permission
+  flow.** Caveat: bare `AVAudioEngine` never raises the prompt, and an
+  unpermitted reader gets **silence, not an error** — do not mistake that for a
+  broken device; ordinary GUI apps (QuickTime, Voice Memos, ...) prompt
+  normally.
+- Quality ceiling is 16 kHz mono (BLE mSBC bandwidth); the OS converts sample
+  rates for apps automatically.
+- In a BLE-only scenario the SDK deliberately does not auto-connect by name
+  prefix (avoids grabbing the wrong board in multi-device environments): call
+  `scan_ble_devices()` then `connect_ble(name)` — see
+  `examples/virtual_mic_demo.rs` for the full flow.
+
 ---
 
 ## Device commands
@@ -449,9 +490,11 @@ Run from the crate root:
 ```sh
 cargo run --example usb_probe        # USB HID + USB Audio
 cargo run --example ble_probe        # BLE scan + connect + audio + keys
+cargo run --example ble_scan         # BLE diagnosis: list every advertising device
 cargo run --example device_demo      # read device info / key config / round-trip write
 cargo run --example listen_demo      # both event facade flavors side-by-side
 cargo run --example uac_capture      # UAC compat capture: levels + optional mono/stereo WAV dumps
+cargo run --release --features virtual-mic --example virtual_mic_demo   # BLE → system-level virtual mic
 ```
 
 All examples need a board connected; they print events to stdout. Add

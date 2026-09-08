@@ -171,6 +171,7 @@ SDK **不模拟、不注入键盘输入**，它只读设备上报并向设备发
 |--------------------|-------------------------------------------------------|--------|
 | `usb`              | `hidapi 2.6`（USB HID）+ `cpal 0.15`（USB Audio 采集）+ `msbc-decoder` | ✅     |
 | `ble`              | `btleplug 0.12`（BLE GATT）+ `futures-util` + `msbc-decoder` | ✅     |
+| `virtual-mic`      | 无新依赖（仅 macOS；构建需 `cmake`）                   | ❌     |
 | `test-mode`        | 工厂测试命令（如 `shutdown_device(0x5E)`）            | ❌     |
 
 板载音频在每条传输上都是 mSBC，所以两个传输 feature 都会引入 `msbc-decoder`
@@ -327,6 +328,39 @@ device.stop_local_audio_reader(); // 触发原始 WAV 落盘
 样本驻留内存（约 128 KB/s），stop 时一次性写入——适合短采集，不要用于超长
 录制。旧单声道固件行为完全不变。见 `examples/uac_capture.rs`。
 
+### 虚拟麦克风（macOS，`virtual-mic`）
+
+BLE 连接时系统不会为板子创建音频设备——BLE 走的是自定义 GATT，不是 HFP/A2DP，
+系统蓝牙栈不认得它。`virtual-mic` feature 补上这最后一环：SDK 附带一个 CoreAudio
+HAL 插件（源码在 `virtual-mic/`，内嵌 vendored
+[libASPL](https://github.com/gavv/libASPL)，MIT），在系统中注册 16 kHz mono
+输入设备 **"ReAI Vibe Board"**，并把 `PcmSink` 收到的 PCM 经回环 UDP 泵进去。
+之后系统设置与任意 App 都能直接选用板子麦克风：
+
+```rust
+use std::sync::Arc;
+use reai_board_sdk::virtual_mic::VirtualMic;
+
+if !VirtualMic::is_installed() {
+    VirtualMic::ensure_installed()?;   // 一次性；弹管理员密码框
+}
+device.set_pcm_sink(Arc::new(VirtualMic::start()?));
+```
+
+要点（全部为 macOS 26 实测结论）：
+
+- 构建该 feature 需要 `cmake`（`brew install cmake`）；驱动产物为
+  arm64 + x86_64 双架构。feature 默认关闭，不影响其他用户的构建。
+- 安装一次完成（拷贝 bundle 到 `/Library/Audio/Plug-Ins/HAL/` 并重启
+  coreaudiod）；BLE 断开重连无需重装，无数据泵入时设备呈现静音。
+- **读取该设备的 App 遵循 macOS 正常麦克风权限流程**。注意：裸用
+  `AVAudioEngine` 不会触发授权弹窗，未授权时读到的是**静默全零**——不是设备
+  坏了；普通 GUI App（QuickTime、语音备忘录等）会正常弹窗。
+- 音质上限 16 kHz mono（BLE mSBC 带宽决定）；App 请求其它采样率由系统自动转换。
+- 纯 BLE 场景下 SDK 的自动连接**故意**不按名字前缀盲连（防多板误连），需先
+  `scan_ble_devices()` 发现、再 `connect_ble(name)` 显式连接——完整流程见
+  `examples/virtual_mic_demo.rs`。
+
 ---
 
 ## 设备命令
@@ -412,9 +446,11 @@ device.set_factory_key_test(true, session).await?;  // CMD 0x6C；事件走 0x6D
 ```sh
 cargo run --example usb_probe        # USB HID + USB Audio
 cargo run --example ble_probe        # BLE 扫描 + 连接 + 音频 + 按键
+cargo run --example ble_scan         # BLE 诊断：列出周围全部广播（排查"连不上"）
 cargo run --example device_demo      # 读设备信息 / 按键配置 / 写回往返
 cargo run --example listen_demo      # 两种事件门面并排演示
 cargo run --example uac_capture      # UAC 兼容通路采集：电平 + 可选 mono/stereo WAV 落盘
+cargo run --release --features virtual-mic --example virtual_mic_demo   # BLE → 系统级虚拟麦克风
 ```
 
 所有 example 都需要连上设备；事件打到 stdout。若还要输出工厂原始物理按键事件，

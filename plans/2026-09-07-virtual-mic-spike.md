@@ -1,5 +1,8 @@
 # virtual-mic spike 报告（2026-09-07）
 
+> **状态：已完成并入 `virtual-mic` feature（2026-09-08 实地测试通过）。**
+> 实测新增结论与当初 spike 的差异见文末「实施后记」。
+
 Issue: reai-board-sdk#11 · 分支: `feat/virtual-mic`
 
 **结论：macOS 虚拟麦克风全链路验证通过。** libASPL（v3.1.2，MIT）示例驱动 SinewaveDevice
@@ -64,8 +67,26 @@ system_profiler SPAudioDataType | grep -A6 Sinewave
 
 ## 下一步
 
-- [ ] 定 libASPL 集成方式：vendor 进仓（cmake 子构建）vs 依赖系统安装（推荐 vendor）
-- [ ] `virtual-mic` Cargo feature + `src/virtual_mic/`（install/start/stop + PcmSink 泵 + 重采样）
-- [ ] ReAI 驱动 crate（C++，基于 libASPL，拷 NetcatDevice 模板改造）
-- [ ] example：BLE 连接 → VirtualMic::start → QuickTime 可选 "ReAI Vibe Board" 录音
-- [ ] README 章节：安装要求、权限说明、16k 音质预期
+- [x] 定 libASPL 集成方式 → **vendor 进仓**（`virtual-mic/libASPL`，build.rs 经 cmake 子构建，无系统安装依赖）
+- [x] `virtual-mic` Cargo feature + `src/virtual_mic/`（`ensure_installed`/`uninstall`/`start` + `PcmSink` UDP 泵）
+- [x] ReAI 驱动（`virtual-mic/driver/`，arm64+x86_64）
+- [x] example：`virtual_mic_demo.rs`（BLE → VirtualMic）
+- [x] README 章节：安装要求、权限说明、16k 音质预期
+
+## 实施后记（2026-09-08，与 spike 结论的差异）
+
+1. **架构简化**：放弃了 spike 时设想的「HAL 插件 loopback 对 + cpal 写输出侧 +
+   16k→48k 重采样」，改为 **UDP 喂入的纯输入设备**（NetcatDevice 反用）：
+   驱动只暴露一个 16 kHz mono 输入设备并监听 `127.0.0.1:47160`，SDK 侧
+   `VirtualMic` 只是实现 `PcmSink` 发 UDP 包。收益：SDK 零新依赖（不需要 cpal、
+   不需要重采样——设备原生 16k，App 侧由系统自动转换），系统里只有一个干净的
+   输入设备。
+2. **`CanBeDefault` 教训（重要）**：设为 `false` 防默认劫持的结果是**设备从系统
+   设置的输入面板里消失**（面板只列出可作默认的设备），CoreAudio 层仍可见，
+   极易误判。必须为 `true`；实际劫持风险不存在——macOS 不会因新设备出现而自动
+   切换已选定的默认输入（spike 时 Sinewave 上位只因为它当时是唯一输入设备）。
+3. **BLE-first**：SDK 热插拔的自动连接**故意**不按 REAI_VB_ 前缀盲连（防多板
+   误连），纯 BLE 场景必须 `scan_ble_devices()` → `connect_ble(name)`。新增
+   `examples/ble_scan.rs` 裸扫诊断，用于区分「板子没广播」和「进程无蓝牙权限」。
+4. **实地验收**：BLE mSBC → 解码 → 虚拟麦克风 → 系统输入电平随说话起伏 →
+   App 录音正常。macOS 全链路打通。

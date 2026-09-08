@@ -41,3 +41,4 @@ GEMINI.md
 /flutter/reai_board_sdk/build/
 /flutter/reai_board_sdk/.flutter-plugins*
 /flutter/reai_board_sdk/pubspec.lock
+virtual-mic/driver/build/
