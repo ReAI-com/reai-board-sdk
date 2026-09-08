@@ -2,9 +2,12 @@
 
 > Issue: reai-board-sdk#11 · 分支: `codex/windows-virtual-mic`
 >
-> **状态：源码交付 + Rust 侧全量验证通过；驱动已于 2026-09-08 在本机
-> （WDK 10.0.26100 + BuildTools 17.14 + Spectre 库）编译、测试签名并通过
-> inf2cat 签名测试；真机安装/录音验收待重启进入测试签名模式后进行。**
+> **状态：已完成并实测通过（2026-09-08）。** 驱动在本机（WDK 10.0.26100 +
+> BuildTools 17.14 + Spectre 库）编译、测试签名、inf2cat 签名测试零错误；
+> 重启进入测试签名模式后设备自动加载（ROOT\MEDIA\0000, Status OK）；
+> 回环自检 PASS（静音 0.00000 / 440Hz 正弦 0.210 / 理论 0.212）；
+> **真机蓝牙链路验收通过**：BLE 连板 → mSBC 解码 → 虚拟麦克风 → 系统
+> App 录音成功。
 
 #11 的 macOS 部分（HAL 插件 + UDP 喂入）已随 v0.3.2 落地；本期补 Windows。
 Windows 没有用户态虚拟音频 API，唯一正路是内核驱动（issue 里预估的
@@ -77,13 +80,20 @@ sysvad 派生 + 签名路线），本期交付的是这条路的**开发模式�
 - [x] 默认 feature 构建不受影响（`virtual-mic` 仍是零依赖 feature；
       Windows 代码全部在 `#[cfg(target_os = "windows")]` 之后）
 - [x] `cargo test`（默认 feature）全绿
-- [ ] **驱动编译**：本机无 WDK（只有 SDK），由 `driver-windows` workflow 在
-      windows-2022 runner 上验证；首次推送后若报错按 CI 修正
-- [ ] **真机验收**：测试签名模式重启 + 导入 .cer + `pnputil /install` +
-      系统声音设置出现 "ReAI-Vibe-Board" + BLE 连板录音比对（需要一台允许
-      测试签名的 Windows 真机）
+- [x] **驱动编译**：本机装 WDK 10.0.26100 + WDK VSIX 组件
+      （Component.Microsoft.Windows.DriverKit.BuildTools）+ Spectre 库
+      （Component.VC.14.44.17.14.x86.x64.Spectre）后编译通过；inf2cat
+      签名测试零错误零警告；signtool 测试签名成功
+- [x] **回环自检**：`virtual_mic_loopback` PASS——预热静音 0.00000 /
+      喂入 440Hz 窗口 0.210（理论 0.212）/ 尾部 0.00000，WAV 落盘
+      `E:\CODE\reai-vbm\loopback.wav`
+- [x] **真机验收**（2026-09-08）：测试签名重启后驱动自动加载（实例
+      ROOT\MEDIA\0000，Status OK）；系统声音设置出现端点「麦克风阵列
+      (ReAI-Vibe-Board Virtual Microphone (WDM))」；BLE 连板 → mSBC 解码
+      → 虚拟麦克风 → App 录音成功；断线重连无需重装驱动
 - [ ] **二期**：EV 证书 + Partner Center 证明签名、安装包化（去掉
-      testsigning 前提）
+      testsigning 前提）；端点友好名精修（INF EP 覆盖 PKEY_Device_FriendlyName,
+      去掉「麦克风阵列」前缀显示）
 
 ## 已知限制（文档里都要讲）
 
