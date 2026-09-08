@@ -29,7 +29,14 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        platform: [x64, ARM64]
+        include:
+          - platform: x64
+            # x64 passes ApiValidator on the runner.
+            apivalidator: "true"
+          - platform: ARM64
+            # The runner's x86 aitstatic cannot validate ARM64 binaries
+            # (exit 193); keep the build, skip the API check.
+            apivalidator: "false"
     steps:
       - uses: actions/checkout@v5
 
@@ -59,7 +66,7 @@ jobs:
           # which some WDK installs lack; inf2cat's signability test still runs.
           msbuild virtual-mic/driver-windows/ReAIVibeBoardVirtualMic.sln `
             /m /p:Configuration=Release /p:Platform=${{ matrix.platform }} /p:SignMode=Off `
-            /p:SkipPackageVerification=true
+            /p:SkipPackageVerification=true /p:ApiValidator_Enable=${{ matrix.apivalidator }}
 
       - name: Create test certificate and sign package
         shell: pwsh
@@ -78,7 +85,9 @@ jobs:
           $out = "virtual-mic/driver-windows/out/Release-${{ matrix.platform }}"
           New-Item -ItemType Directory -Force -Path $out | Out-Null
 
-          foreach ($name in @("ReAIVibeBoardVirtualMic.sys","ReAIVibeBoardVirtualMic.inf","ReAIVibeBoardVirtualMic.cat")) {
+          # Sign .sys and .cat only — the .inf is covered by the catalog's
+          # signature; signtool refuses raw INF files.
+          foreach ($name in @("ReAIVibeBoardVirtualMic.sys","ReAIVibeBoardVirtualMic.cat")) {
             $file = Get-ChildItem -Path "virtual-mic/driver-windows" -Recurse -Filter $name |
               Where-Object { $_.FullName -match '\\package\\' -and $_.FullName -notmatch 'out' } |
               Select-Object -First 1
@@ -87,6 +96,12 @@ jobs:
             if ($LASTEXITCODE -ne 0) { throw "signtool failed for $($file.FullName)" }
             Copy-Item $file.FullName $out -Force
           }
+
+          $infFile = Get-ChildItem -Path "virtual-mic/driver-windows" -Recurse -Filter "ReAIVibeBoardVirtualMic.inf" |
+            Where-Object { $_.FullName -match '\\package\\' -and $_.FullName -notmatch 'out' } |
+            Select-Object -First 1
+          if (-not $infFile) { throw "built INF not found" }
+          Copy-Item $infFile.FullName $out -Force
 
           Export-Certificate -Cert $cert -FilePath (Join-Path $out "testsign.cer") | Out-Null
 
