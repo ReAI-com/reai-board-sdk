@@ -33,18 +33,26 @@ if (-not (Test-Path $solution)) {
     throw "driver solution not found: $solution"
 }
 
-# --- locate MSBuild via vswhere ---------------------------------------------
+# --- locate MSBuild: vswhere first, then known BuildTools/VS paths ----------
+# (some BuildTools installs never register a VS instance, so vswhere alone
+#  returns empty — always fall back to the standard layout)
 $vswhere = Join-Path ${env:ProgramFiles(x86)} "Microsoft Visual Studio\Installer\vswhere.exe"
-if (-not (Test-Path $vswhere)) {
-    throw "vswhere.exe not found; install Visual Studio 2022 (Build Tools suffice)."
+$msbuild = $null
+if (Test-Path $vswhere) {
+    $msbuild = & $vswhere -latest -products * -find MSBuild\**\Bin\MSBuild.exe |
+        Select-Object -First 1
 }
-
-$msbuild = & $vswhere -latest -products * `
-    -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 `
-    -find MSBuild\**\Bin\MSBuild.exe | Select-Object -First 1
 if (-not $msbuild) {
-    throw "MSBuild.exe not found; install the VS C++ workload."
+    $editions = @("BuildTools", "Community", "Professional", "Enterprise")
+    $msbuild = $editions | ForEach-Object {
+        @("${env:ProgramFiles(x86)}\Microsoft Visual Studio\2022\$_\MSBuild\Current\Bin\amd64\MSBuild.exe",
+          "${env:ProgramFiles(x86)}\Microsoft Visual Studio\2022\$_\MSBuild\Current\Bin\MSBuild.exe")
+    } | Where-Object { Test-Path $_ } | Select-Object -First 1
 }
+if (-not $msbuild) {
+    throw "MSBuild.exe not found; install Visual Studio 2022 (Build Tools suffice)."
+}
+Write-Host "MSBuild: $msbuild"
 
 # --- locate the WDK (needed by the driver toolset) --------------------------
 $wdkRoot = Join-Path ${env:ProgramFiles(x86)} "Windows Kits\10"
@@ -53,17 +61,19 @@ if (-not (Test-Path (Join-Path $wdkRoot "Include"))) {
 }
 
 Write-Host "== msbuild $Configuration|$Platform =="
-& $msbuild $solution "/m" "/p:Configuration=$Configuration" "/p:Platform=$Platform"
+# SignMode=Off: the WDK's built-in SignTask wants an elevated certificate
+# container; this script signs the package itself below (-TestSign).
+& $msbuild $solution "/m" "/p:Configuration=$Configuration" "/p:Platform=$Platform" "/p:SignMode=Off"
 if ($LASTEXITCODE -ne 0) {
     throw "msbuild failed with exit code $LASTEXITCODE"
 }
 
 # --- collect the package ----------------------------------------------------
-$outDir = Join-Path $driverDir "out\$Configuration$Platform"
+$outDir = Join-Path $driverDir "out\$Configuration-$Platform"
 New-Item -ItemType Directory -Force -Path $outDir | Out-Null
 
 $packageDir = Get-ChildItem -Path $driverDir -Recurse -Filter "ReAIVibeBoardVirtualMic.inf" |
-    Where-Object { $_.FullName -match [regex]::Escape("$Configuration") -and $_.FullName -match [regex]::Escape($Platform) } |
+    Where-Object { $_.FullName -match '\\package\\' -and $_.FullName -match [regex]::Escape($Platform) } |
     Select-Object -First 1
 if (-not $packageDir) {
     throw "built INF not found; check msbuild output paths"

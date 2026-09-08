@@ -403,7 +403,7 @@ Return Value:
 
                         pMAG->usNumberOfMicrophones = 1;    // Count of microphone coordinate structures to follow.
 
-                        pMAG->KsMicCoord[0].usType = (USHORT)KSMICARRAY_MICTYPE_OMNI;
+                        pMAG->KsMicCoord[0].usType = (USHORT)KSMICARRAY_MICTYPE_OMNIDIRECTIONAL;
                         pMAG->KsMicCoord[0].wXCoord = 0;
                         pMAG->KsMicCoord[0].wYCoord = 0;
                         pMAG->KsMicCoord[0].wZCoord = 0;

@@ -38,8 +38,20 @@ Visual Studio 2022 with the C++ workload **and the Windows Driver Kit**, then:
 ```powershell
 # from the repository root
 pwsh -File scripts/build-driver-windows.ps1 -Platform x64 -Configuration Release -TestSign
-# → virtual-mic/driver-windows/out/ReleaseX64/{ReAIVibeBoardVirtualMic.sys,.inf,.cat,testsign.cer}
+# → virtual-mic/driver-windows/out/Release-x64/{ReAIVibeBoardVirtualMic.sys,.inf,.cat,testsign.cer}
 ```
+
+On **Build Tools-only** machines the WDK installer may skip VS integration
+(`error MSB8020: WindowsKernelModeDriver10.0 build tools not found`). Fix by
+adding the individual components in the Visual Studio Installer:
+
+- `Component.Microsoft.Windows.DriverKit.BuildTools` (the WDK VSIX)
+- `Microsoft.VisualStudio.Component.VC.14.44.17.14.x86.x64.Spectre`
+  (MSVC Spectre-mitigated libs — the driver toolset requires them)
+
+The build passes `/p:SignMode=Off` so the WDK's built-in SignTask (which wants
+an elevated certificate container) is skipped; `-TestSign` does the signing
+with signtool against a CurrentUser self-signed cert instead.
 
 Or grab the test-signed artifact from the repo's **driver-windows** GitHub
 Actions workflow (runs on `windows-2022` runners where the WDK is still

@@ -2,8 +2,9 @@
 
 > Issue: reai-board-sdk#11 · 分支: `codex/windows-virtual-mic`
 >
-> **状态：源码交付 + Rust 侧全量验证通过；驱动编译进 CI（windows-2022）验证，
-> 真机安装/录音验收待测试签名环境（见文末待办）。**
+> **状态：源码交付 + Rust 侧全量验证通过；驱动已于 2026-09-08 在本机
+> （WDK 10.0.26100 + BuildTools 17.14 + Spectre 库）编译、测试签名并通过
+> inf2cat 签名测试；真机安装/录音验收待重启进入测试签名模式后进行。**
 
 #11 的 macOS 部分（HAL 插件 + UDP 喂入）已随 v0.3.2 落地；本期补 Windows。
 Windows 没有用户态虚拟音频 API，唯一正路是内核驱动（issue 里预估的
