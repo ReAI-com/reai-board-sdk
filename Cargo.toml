@@ -89,3 +89,7 @@ required-features = ["ble", "virtual-mic"]
 [[example]]
 name = "ble_scan"
 required-features = ["ble"]
+
+[[example]]
+name = "virtual_mic_loopback"
+required-features = ["usb", "virtual-mic"]
