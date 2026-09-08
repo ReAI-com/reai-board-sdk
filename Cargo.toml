@@ -39,6 +39,13 @@ usb = ["dep:hidapi", "dep:cpal", "dep:msbc-decoder"]
 # The rest of this crate is MIT. See the `usb` note above — any transport that
 # carries board audio needs the decoder.
 ble = ["dep:btleplug", "dep:futures-util", "dep:msbc-decoder"]
+# macOS virtual microphone (macOS only): registers a system-level input device
+# "ReAI Vibe Board" backed by the bundled CoreAudio HAL plugin in `virtual-mic/`
+# (built by build.rs via cmake — requires cmake when this feature is enabled),
+# and pumps decoded board PCM into it over loopback UDP. Enable together with
+# `ble`. Consumers of the virtual mic are regular macOS apps and follow normal
+# microphone-permission (TCC) rules.
+virtual-mic = []
 # Factory test commands (e.g. shutdown 0x5E)
 test-mode = []
 
@@ -76,3 +83,11 @@ env_logger = "0.11"
 # Examples wait on Ctrl-C; `signal` is example-only so library consumers do not
 # pay for the signal driver.
 tokio = { version = "1", default-features = false, features = ["signal"] }
+
+[[example]]
+name = "virtual_mic_demo"
+required-features = ["ble", "virtual-mic"]
+
+[[example]]
+name = "ble_scan"
+required-features = ["ble"]

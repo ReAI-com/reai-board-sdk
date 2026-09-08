@@ -25,6 +25,8 @@ use crate::kernel::event::{
 };
 use crate::kernel::protocol_hid::*;
 use crate::kernel::sink::{AudioFrameSink, CountingSink, PcmAudioFrameAdapter, PcmSink};
+#[cfg(all(feature = "virtual-mic", target_os = "macos"))]
+use crate::kernel::audio::AudioFrame;
 use crate::kernel::types::ConnectionType;
 use crate::runtime::hotplug::{spawn_blocking_with_runloop, HotplugConfig, HotplugManager};
 use crate::tool::parse::{parse_device_info_from_buf, parse_device_info_from_gatt};
@@ -79,6 +81,11 @@ pub struct BoardDeviceCore {
     audio_frame_sink: Mutex<Option<Arc<dyn AudioFrameSink>>>,
     /// PCM sink(USB Audio + BLE mSBC 解码后统一到 f32)
     pcm_sink: Mutex<Option<Arc<dyn PcmSink>>>,
+    /// macOS 虚拟麦克风:启动开关配置 + 懒创建的发送端(首次音频链路时生效)
+    #[cfg(all(feature = "virtual-mic", target_os = "macos"))]
+    virtual_mic_config: Mutex<crate::virtual_mic::VirtualMicConfig>,
+    #[cfg(all(feature = "virtual-mic", target_os = "macos"))]
+    virtual_mic: Mutex<Option<Arc<crate::virtual_mic::VirtualMic>>>,
     #[cfg(feature = "usb")]
     usb_capture: Mutex<Option<UsbAudioCapture>>,
     /// UAC 立体声原始 WAV 落盘路径(研究数据,opt-in;须在 start_usb_uac_compat 前调)
@@ -121,6 +128,10 @@ impl BoardDeviceCore {
             vendor_gatt_client: Arc::new(Mutex::new(None)),
             audio_frame_sink: Mutex::new(None),
             pcm_sink: Mutex::new(None),
+            #[cfg(all(feature = "virtual-mic", target_os = "macos"))]
+            virtual_mic_config: Mutex::new(crate::virtual_mic::VirtualMicConfig::default()),
+            #[cfg(all(feature = "virtual-mic", target_os = "macos"))]
+            virtual_mic: Mutex::new(None),
             #[cfg(feature = "usb")]
             usb_capture: Mutex::new(None),
             #[cfg(feature = "usb")]
@@ -146,6 +157,12 @@ impl BoardDeviceCore {
     /// 设置 PCM sink(板载 mSBC 经 EncodedAudioDecoderSink 解码后送;UAC 兼容路径直送)
     pub fn set_pcm_sink(&self, sink: Arc<dyn PcmSink>) {
         *self.pcm_sink.lock().unwrap() = Some(sink);
+    }
+
+    /// macOS 虚拟麦克风启动开关(由 facade::open 从 BoardConfig 传入)。
+    #[cfg(all(feature = "virtual-mic", target_os = "macos"))]
+    pub fn set_virtual_mic_config(&self, config: crate::virtual_mic::VirtualMicConfig) {
+        *self.virtual_mic_config.lock().unwrap() = config;
     }
 
     /// 设置 UAC 立体声原始 WAV 落盘路径(降混前交织 \[L,R] 研究数据,opt-in)。
@@ -400,6 +417,11 @@ impl BoardDeviceCore {
     pub fn shutdown(&self) {
         // 先关闭启动门，再通知/回收任务，防连接回调在清理窗口重建 capture。
         self.started.store(false, Ordering::SeqCst);
+        #[cfg(all(feature = "virtual-mic", target_os = "macos"))]
+        {
+            // 丢弃发送端(socket);系统设备保留,无数据时呈现静音
+            *self.virtual_mic.lock().unwrap() = None;
+        }
         if let Some(stop) = self.hotplug_stop.lock().unwrap().as_ref() {
             stop.store(false, Ordering::SeqCst);
         }
@@ -1628,13 +1650,62 @@ impl BoardDeviceCore {
 
     /// Construct the unified decoded-frame sink. Legacy PcmSink remains an adapter only.
     fn build_audio_sink(&self) -> Arc<dyn AudioFrameSink> {
-        if let Some(frame_sink) = self.audio_frame_sink.lock().unwrap().clone() {
-            return frame_sink;
+        let base: Arc<dyn AudioFrameSink> =
+            if let Some(frame_sink) = self.audio_frame_sink.lock().unwrap().clone() {
+                frame_sink
+            } else if let Some(pcm) = self.pcm_sink.lock().unwrap().clone() {
+                Arc::new(PcmAudioFrameAdapter::new(pcm))
+            } else {
+                Arc::new(CountingSink::new())
+            };
+        #[cfg(all(feature = "virtual-mic", target_os = "macos"))]
+        if let Some(vm) = self.virtual_mic_sink() {
+            return Arc::new(VirtualMicTee { base, vm });
         }
-        if let Some(pcm) = self.pcm_sink.lock().unwrap().clone() {
-            return Arc::new(PcmAudioFrameAdapter::new(pcm));
+        base
+    }
+
+    /// macOS 虚拟麦克风发送端,懒创建(首次音频链路时;失败只降级不阻塞音频)。
+    #[cfg(all(feature = "virtual-mic", target_os = "macos"))]
+    fn virtual_mic_sink(&self) -> Option<Arc<crate::virtual_mic::VirtualMic>> {
+        let mut slot = self.virtual_mic.lock().unwrap();
+        if slot.is_some() {
+            return slot.clone();
         }
-        Arc::new(CountingSink::new())
+        let config = self.virtual_mic_config.lock().unwrap().clone();
+        if !config.enabled {
+            return None;
+        }
+        use crate::virtual_mic::VirtualMic;
+        if !VirtualMic::is_installed() {
+            if config.auto_install {
+                log::info!("virtual-mic: 驱动未安装,请求安装(请留意系统密码框)...");
+                if let Err(error) = VirtualMic::ensure_installed() {
+                    log::warn!("virtual-mic: 驱动安装失败,虚拟麦克风停用: {error}");
+                    return None;
+                }
+            } else {
+                log::warn!(
+                    "virtual-mic: 驱动未安装,虚拟麦克风停用(可设 auto_install=true \
+                     或先调 VirtualMic::ensure_installed())"
+                );
+                return None;
+            }
+        }
+        match VirtualMic::start() {
+            Ok(vm) => {
+                log::info!(
+                    "virtual-mic: 已启用,系统麦克风 \"{}\" 可选",
+                    crate::virtual_mic::DEVICE_NAME
+                );
+                *slot = Some(Arc::new(vm));
+                slot.clone()
+            }
+            Err(error) => {
+                log::warn!("virtual-mic: 启动失败,虚拟麦克风停用: {error}");
+                None
+            }
+        }
     }
 
     #[cfg(feature = "ble")]
@@ -1650,6 +1721,22 @@ fn capability_query_matches_current_connection(
     current_epoch: u64,
 ) -> bool {
     current_connection == Some(expected_connection) && current_epoch == expected_epoch
+}
+
+/// macOS 虚拟麦克风并行投递:解码帧同时送主 sink 与系统虚拟麦克风。
+#[cfg(all(feature = "virtual-mic", target_os = "macos"))]
+struct VirtualMicTee {
+    base: Arc<dyn AudioFrameSink>,
+    vm: Arc<crate::virtual_mic::VirtualMic>,
+}
+
+#[cfg(all(feature = "virtual-mic", target_os = "macos"))]
+impl AudioFrameSink for VirtualMicTee {
+    fn on_audio_frame(&self, frame: AudioFrame<'_>) {
+        let pcm = frame.pcm;
+        self.base.on_audio_frame(frame);
+        self.vm.on_pcm(pcm);
+    }
 }
 
 // ================================================================

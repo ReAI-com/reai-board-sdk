@@ -7,6 +7,25 @@ follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Added
 
+- **`virtual-mic` feature (macOS, opt-in): the BLE-connected board can now
+  surface as a system-level microphone.** Ships a bundled CoreAudio HAL plugin
+  (`virtual-mic/`, built by `build.rs` via cmake, vendored
+  [libASPL](https://github.com/gavv/libASPL) v3.1.2 under MIT) that registers
+  a 16 kHz mono input device "ReAI Vibe Board", plus a `VirtualMic` `PcmSink`
+  that pumps decoded board PCM into it over loopback UDP. One-time admin
+  install via `VirtualMic::ensure_installed()` (copy bundle into
+  `/Library/Audio/Plug-Ins/HAL/` + restart coreaudiod). Field-tested end to end
+  on macOS 26 (BLE mSBC → decoder → virtual mic → app recording). Apps reading
+  the device follow normal macOS microphone-permission rules — bare
+  `AVAudioEngine` readers get silence instead of a prompt, documented as a
+  known trap. The feature is off by default and pulls in no new dependencies
+  (cmake only needed to build it).
+- Added `examples/virtual_mic_demo.rs` — scan → explicit `connect_ble()` (the
+  auto-reconnect path intentionally never connects by name prefix alone) →
+  pump BLE audio into the virtual microphone.
+- Added `examples/ble_scan.rs` — unfiltered 15 s advertising scan listing every
+  visible peripheral, to tell "board not advertising" and "no Bluetooth
+  permission" apart when a connection fails.
 - UAC now pairs with the dual-mic stereo firmware (v1.72+, `[L,R]` interleaved
   16 kHz/2ch output). Explicit cpal config selection still prefers 16 kHz/1ch/F32
   but falls back to 2ch before the `default_input_config()` escape hatch, so
