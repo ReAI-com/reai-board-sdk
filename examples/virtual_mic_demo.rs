@@ -10,8 +10,11 @@
 //! 输入 可见该设备;用 QuickTime / 语音备忘录等普通 App 选它录音即可
 //! (普通 App 遵循正常麦克风权限流程)。
 //!
-//! 需要:macOS + cmake(`brew install cmake`)、板子已 USB 配对过、蓝牙开启。
-//! Ctrl+C 退出。
+//! 需要:板子已 USB 配对过、蓝牙开启。Ctrl+C 退出。
+//! - macOS + cmake(`brew install cmake`):驱动随构建编译,adhoc 签名即可加载。
+//! - Windows:先用 WDK 构建驱动包(`scripts/build-driver-windows.ps1 -TestSign`,
+//!   详见 `virtual-mic/driver-windows/README.md`),开启测试签名模式并导入
+//!   测试证书后,设 `REAI_VIRTUAL_MIC_DRIVER_DIR` 指向包目录再运行。
 
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};

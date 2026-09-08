@@ -12,21 +12,12 @@
 pub const DEVICE_NAME: &str = "ReAI-Vibe-Board";
 
 /// 虚拟麦克风启动开关（放 [`crate::BoardConfig::virtual_mic`]）。
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct VirtualMicConfig {
     /// 是否在首次建立音频链路时启用。
     pub enabled: bool,
     /// 驱动缺失时是否请求安装；失败只会降级并记录日志。
     pub auto_install: bool,
-}
-
-impl Default for VirtualMicConfig {
-    fn default() -> Self {
-        Self {
-            enabled: false,
-            auto_install: false,
-        }
-    }
 }
 
 #[cfg(target_os = "macos")]

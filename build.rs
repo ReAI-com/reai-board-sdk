@@ -46,7 +46,10 @@ fn main() {
         .args(&configure_args)
         .status()
         .expect("cmake not found: the `virtual-mic` feature requires cmake (brew install cmake)");
-    assert!(status.success(), "cmake configure failed for virtual-mic driver");
+    assert!(
+        status.success(),
+        "cmake configure failed for virtual-mic driver"
+    );
 
     let status = Command::new("cmake")
         .arg("--build")
@@ -56,9 +59,19 @@ fn main() {
         .arg("--parallel")
         .status()
         .expect("failed to run cmake build");
-    assert!(status.success(), "cmake build failed for virtual-mic driver");
+    assert!(
+        status.success(),
+        "cmake build failed for virtual-mic driver"
+    );
 
     let bundle = build_dir.join("ReAIVibeBoard.driver");
-    assert!(bundle.exists(), "driver bundle missing after cmake build: {}", bundle.display());
-    println!("cargo:rustc-env=REAI_VIRTUAL_MIC_DRIVER={}", bundle.display());
+    assert!(
+        bundle.exists(),
+        "driver bundle missing after cmake build: {}",
+        bundle.display()
+    );
+    println!(
+        "cargo:rustc-env=REAI_VIRTUAL_MIC_DRIVER={}",
+        bundle.display()
+    );
 }

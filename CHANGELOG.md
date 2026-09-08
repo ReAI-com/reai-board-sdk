@@ -5,6 +5,28 @@ follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Added
+
+- **Windows support for `virtual-mic` (development mode).** A SysVAD-derived
+  PortCls/WaveRT capture driver (`virtual-mic/driver-windows/`, based on
+  Microsoft's MIT-licensed SimpleAudioSample) exposes the BLE-connected board
+  as a 16 kHz mono capture endpoint "ReAI-Vibe-Board". The Windows `VirtualMic`
+  feeds it through writes to the `\\.\ReAIVibeBoardVirtualMic` control device;
+  the driver keeps a bounded ring (underflow renders silence, overflow drops
+  instead of buffering). Install runs elevated
+  `pnputil /add-driver <inf> /install` against a test-signed WDK package whose
+  directory is given via `REAI_VIRTUAL_MIC_DRIVER_DIR`; enabling test-signing
+  mode and certificate import stay the integrator's responsibility. Production
+  distribution (EV cert + Partner Center attestation) is issue #11's separate
+  phase-two. Ships with a `driver-windows` GitHub Actions workflow (windows-2022
+  runners, where the WDK is still preinstalled) and
+  `scripts/build-driver-windows.ps1` for local builds with optional test
+  signing.
+- Windows joined the CI `check` matrix: `src/virtual_mic/windows.rs` and the
+  whole SDK now compile and test on `windows-latest`, and new contract tests
+  guard that the Rust backend and the driver's INF / device names cannot drift
+  apart.
+
 ## [0.3.2] — 2026-09-08
 
 ### Added

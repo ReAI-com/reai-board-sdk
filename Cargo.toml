@@ -16,8 +16,9 @@ readme = "README.md"
 # crates.io 上限 5 个 keywords
 keywords = ["keyboard", "hid", "ble", "usb", "hardware"]
 categories = ["api-bindings", "hardware-support"]
-# 产品配图仅用于 GitHub / crates.io 页面展示，不进 crate 包
-exclude = ["assets/*", "flutter/**", "plans/**"]
+# 产品配图仅用于 GitHub / crates.io 页面展示，不进 crate 包；
+# Windows 虚拟麦克风驱动是独立 WDK 工程，产物随发布 artifact 走，不进 crate 包
+exclude = ["assets/*", "flutter/**", "plans/**", "virtual-mic/driver-windows/**"]
 
 [package.metadata.docs.rs]
 all-features = true
