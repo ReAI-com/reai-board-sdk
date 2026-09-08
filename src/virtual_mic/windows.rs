@@ -124,8 +124,13 @@ impl PcmSink for VirtualMic {
         let payload = s16le_payload(samples);
         // The driver owns a bounded producer ring. Never block the decoder:
         // failure/fullness drops a frame instead of accumulating latency.
+        // write_all matters: a partial write would leave the S16 stream
+        // misaligned (every later frame shifts into noise), so a failed or
+        // short write aborts the whole payload instead.
         if let Ok(mut file) = self.file.lock() {
-            let _ = file.write(&payload);
+            if file.write_all(&payload).is_err() {
+                log::debug!("virtual-mic: 控制设备写入失败（驱动未加载？），丢弃本帧");
+            }
         }
     }
 }
