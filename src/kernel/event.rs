@@ -1,8 +1,8 @@
 //! 设备事件类型。
 //!
-//! SDK 内部通过 `broadcast::Sender<BoardEvent>` 上报,消费者(facade 层的 BoardDevice)
-//! 用 `subscribe()` 拿到 Receiver。用单一 enum 替代散装 struct + 字符串 channel
-//! 路由 —— 一次 match 全覆盖,类型安全。
+//! SDK 内部通过 `broadcast::Sender<BoardEvent>` 上报,消费者(Phase 5 的 BoardDevice)
+//! 用 `subscribe()` 拿到 Receiver。用单一 enum 替代 src-tauri 的散装 struct +
+//! 字符串 channel 路由 —— 一次 match 全覆盖,类型安全。
 
 use crate::kernel::types::ConnectionType;
 use serde::{Deserialize, Serialize};
@@ -61,7 +61,7 @@ pub enum DisconnectReason {
     ConnectionTypeChanged(ConnectionType),
     /// 主动断开
     UserAction,
-    /// 固件主动断开(CMD=0x60,关机)
+    /// 固件主动断开(BLE 收到过 CMD=0x60 通知:闲置休眠/长按断开)
     DeviceDisconnect,
 }
 

@@ -5,6 +5,16 @@ follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Added
+
+- **BLE disconnect reason reporting.** When the board sends the CMD 0x60
+  device-disconnect notify (idle sleep / long-press disconnect), the BLE
+  session now reports `DisconnectReason::DeviceDisconnect` instead of
+  `DeviceGone`, so applications can tell "board went to sleep" apart from
+  signal loss and prompt e.g. "keyboard is asleep — press any key to wake".
+  Reconnect behavior is unchanged (still auto-reconnects).
+  ([#14](https://github.com/ReAI-com/reai-board-sdk/issues/14))
+
 ## [0.3.3] — 2026-09-08
 
 ### Added

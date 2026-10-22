@@ -10,7 +10,7 @@
 //! pending map 从 `std::sync::mpsc` 改为 `tokio::sync::oneshot`。
 
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicU8, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
@@ -89,6 +89,13 @@ struct GattEventState {
     aggregator: Option<KeyStateAggregator>,
     ai_voice_pressed: bool,
     mode: ConsumerModeTracker,
+    /// 设备主动断开通知(CMD=0x60)的原因码。0=本连接未收到,≥1=收到(固件 reason 字节)。
+    ///
+    /// Arc 与 [`VendorGattClient`] 共享:通知任务收到 0x60 时写入,hotplug 在 BLE 会话
+    /// 结束时读取,把「固件主动断开(闲置休眠/长按断开)」与信号丢失区分开
+    /// (上报 [`DisconnectReason::DeviceDisconnect`])。只影响上报原因,连接语义不变——
+    /// 仍走自动重连,设备休眠唤醒/重启后会重新广播。
+    device_disconnect_reason: Arc<AtomicU8>,
 }
 
 impl GattEventState {
@@ -134,6 +141,8 @@ pub struct VendorGattClient {
     notify_handle: Mutex<Option<tokio::task::JoinHandle<()>>>,
     /// 音频解码线程的 JoinHandle。`disconnect` 时 join(超时保护),避免线程悬挂。
     audio_thread_handle: Mutex<Option<std::thread::JoinHandle<()>>>,
+    /// 设备主动断开通知(0x60)原因码,与通知任务的 [`GattEventState`] 同名字段共享。
+    device_disconnect_reason: Arc<AtomicU8>,
 }
 
 impl VendorGattClient {
@@ -157,6 +166,7 @@ impl VendorGattClient {
             audio_route_epoch: Arc::new(AtomicU64::new(0)),
             notify_handle: Mutex::new(None),
             audio_thread_handle: Mutex::new(None),
+            device_disconnect_reason: Arc::new(AtomicU8::new(0)),
         }
     }
 
@@ -322,6 +332,8 @@ impl VendorGattClient {
 
         *self.peripheral.lock().unwrap() = Some(peripheral.clone());
         *self.chars.lock().unwrap() = Some(found_chars);
+        // 新连接清掉上一连接可能残留的 0x60 主动断开标志
+        self.device_disconnect_reason.store(0, Ordering::SeqCst);
         self.running.store(true, Ordering::SeqCst);
 
         Ok(())
@@ -429,6 +441,7 @@ impl VendorGattClient {
         let audio_sink = self.audio_sink.clone();
         let event_tx = self.event_tx.clone();
         let pending = self.pending_responses.clone();
+        let device_disconnect_reason = self.device_disconnect_reason.clone();
         let event_uuid = protocol::EVENT_CHAR_UUID;
         let audio_uuid = protocol::AUDIO_CHAR_UUID;
 
@@ -497,7 +510,10 @@ impl VendorGattClient {
 
             log::info!(target: "gatt", "通知监听已启动");
 
-            let mut state = GattEventState::default();
+            let mut state = GattEventState {
+                device_disconnect_reason,
+                ..Default::default()
+            };
             let mut notif_count: u64 = 0;
             let mut audio_count: u64 = 0;
             // 心跳:CoreBluetooth 断连后 notifications().next() 不立即返回 None,
@@ -640,6 +656,14 @@ impl VendorGattClient {
     pub fn running(&self) -> Arc<AtomicBool> {
         self.running.clone()
     }
+
+    /// 取走设备主动断开通知(0x60)的原因码;None=本连接未收到过。
+    ///
+    /// 取走即清零,供 hotplug 在 BLE 会话结束时一次性判定断开原因。
+    pub fn take_device_disconnect_reason(&self) -> Option<u8> {
+        let reason = self.device_disconnect_reason.swap(0, Ordering::SeqCst);
+        (reason != 0).then_some(reason)
+    }
 }
 
 // ============ 辅助 ============
@@ -737,7 +761,7 @@ fn handle_event(
                         event_tx.send(BoardEvent::AiVoiceKey(AiVoiceKeyEvent { pressed: true }));
                 }
 
-                // USB and BLE share one mode tracker; transport differences end here.
+                // 与 USB 共用同一套拨杆状态机，传输差异到这里已经结束。
                 if let Some((mode_value, mode_name)) = mode_change {
                     let _ = event_tx.send(BoardEvent::ModeChange(ModeChangeEvent {
                         mode: mode_name.to_string(),
@@ -773,10 +797,17 @@ fn handle_event(
             }
         }
         CMD_DEVICE_DISCONNECT => {
-            // 设备主动断开(关机/用户操作):当非正常断开处理,重启后自动重连。
+            // 设备主动断开(闲置休眠/长按断开):记录原因码供断开上报区分
+            // 「固件主动断开」与信号丢失(DeviceDisconnect vs DeviceGone)。
+            // 连接语义不变——仍按异常断开走自动重连(设备休眠唤醒/重启后会重新广播);
             // 不在此置 ble_auto_connect=false —— 那会导致设备关机重启后无法自动重连。
             // hotplug 通过扫描失败上限兜底永久离开。
-            log::info!(target: "gatt", "[GATT] 收到设备主动断开通知 (CMD=0x60),当异常断开处理");
+            let reason = payload.first().copied().unwrap_or(0).max(1);
+            state.device_disconnect_reason.store(reason, Ordering::SeqCst);
+            log::info!(
+                target: "gatt",
+                "[GATT] 收到设备主动断开通知 (CMD=0x60, reason=0x{reason:02X}),断开上报将标记 DeviceDisconnect"
+            );
         }
         _ => {
             log::debug!(target: "gatt", "[GATT] 未处理 Event CMD=0x{:02X}", cmd);
@@ -806,6 +837,22 @@ mod tests {
             (key_value & 0xFF) as u8,
             ((key_value >> 8) & 0xFF) as u8,
         ]
+    }
+
+    #[test]
+    fn device_disconnect_notify_records_reason() {
+        let (tx, _rx) = broadcast::channel(4);
+        let pending = Arc::new(Mutex::new(HashMap::new()));
+
+        // 收到 0x60 带原因码:[CMD=0x60][LEN=1][reason=0x02 闲置休眠]
+        let mut state = GattEventState::default();
+        handle_event(&[0x60, 0x01, 0x02], &mut state, &tx, &pending);
+        assert_eq!(state.device_disconnect_reason.load(Ordering::SeqCst), 2);
+
+        // 原因码缺失(LEN=0)也置标志(归一为 1),保证仍能区分主动断开
+        let mut state = GattEventState::default();
+        handle_event(&[0x60, 0x00], &mut state, &tx, &pending);
+        assert_eq!(state.device_disconnect_reason.load(Ordering::SeqCst), 1);
     }
 
     #[cfg(feature = "test-mode")]

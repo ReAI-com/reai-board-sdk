@@ -396,7 +396,7 @@ pub type OnMonitorReady = Box<
 >;
 #[cfg(feature = "ble")]
 pub type OnBleDeviceNameUpdated = Box<dyn Fn(&str) + Send + Sync>;
-/// 延迟创建 VendorGattClient 的回调。
+/// 延迟创建 VendorGattClient 的回调（方案 B）。
 ///
 /// 返回一个 Future，解析到已就绪的 client。hotplug 的 BLE 路径首次进入时调用它——
 /// 那一刻才建 adapter（触发 macOS 蓝牙授权弹窗），而不是 App 启动时就建。
@@ -419,7 +419,7 @@ pub struct HotplugManager {
     #[cfg(feature = "usb")]
     on_monitor_ready: Option<OnMonitorReady>,
     #[cfg(feature = "ble")]
-    /// BLE GATT 客户端的共享槽（与 BoardDeviceCore 同一个 `Arc<Mutex>`）。
+    /// BLE GATT 客户端的共享槽（与 BoardDeviceCore 同一个 Arc<Mutex>）。
     /// 初始为 None——由 [`ensure_client`] 在首次进入 BLE 路径时延迟填充。
     vendor_gatt_client_slot: Arc<Mutex<Option<Arc<VendorGattClient>>>>,
     #[cfg(feature = "ble")]
@@ -480,7 +480,7 @@ impl HotplugManager {
         self
     }
 
-    /// 注册延迟创建 VendorGattClient 的回调。
+    /// 注册延迟创建 VendorGattClient 的回调（方案 B）。
     /// hotplug 的 BLE 路径首次进入时调用它——那一刻才建 adapter（触发蓝牙授权）。
     #[cfg(feature = "ble")]
     pub fn with_ble_ensure_client(mut self, ensure: EnsureVendorGattClient) -> Self {
@@ -588,7 +588,7 @@ impl HotplugManager {
             // 只自动重连明确记录过的目标。没有目标时等待用户扫描选择，
             // 避免多台设备环境下误连任意一个 REAI_VB_ 设备。
             // vendor_gatt_client 不在这里检查——它由 run_ble_session 通过 ensure 回调
-            // 延迟创建，此处只看「用户是否要 BLE」（auto_connect + target）。
+            // 延迟创建（方案 B），此处只看「用户是否要 BLE」（auto_connect + target）。
             let has_target = self.ble_last_device_name.lock().unwrap().is_some();
             if has_target && self.ble_auto_connect.load(Ordering::SeqCst) {
                 return Some(ConnectionType::Ble);
@@ -783,7 +783,7 @@ impl HotplugManager {
 
     #[cfg(feature = "ble")]
     async fn run_ble_session(&mut self) {
-        // client 延迟创建：先看共享槽里有没有，没有则通过 ensure 回调建
+        // 方案 B：client 延迟创建。先看共享槽里有没有，没有则通过 ensure 回调建
         // （那一刻才建 adapter，触发 macOS 蓝牙授权弹窗）。
         let client = {
             let guard = self.vendor_gatt_client_slot.lock().unwrap();
@@ -915,7 +915,14 @@ impl HotplugManager {
         let _ = client.disconnect().await;
 
         // 8. 不改 ble_auto_connect —— GATT 断连保持 true 自动重连
-        self.notify_disconnected(DisconnectReason::DeviceGone);
+        // 收到过 0x60(固件主动断开:闲置休眠/长按断开)时上报 DeviceDisconnect,
+        // 区别于信号丢失,应用层可提示「键盘已休眠,按任意键唤醒」。
+        let reason = if client.take_device_disconnect_reason().is_some() {
+            DisconnectReason::DeviceDisconnect
+        } else {
+            DisconnectReason::DeviceGone
+        };
+        self.notify_disconnected(reason);
         log::info!(target: "hotplug", "BLE 设备已断开");
     }
 
