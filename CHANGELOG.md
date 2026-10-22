@@ -14,6 +14,39 @@ follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   signal loss and prompt e.g. "keyboard is asleep — press any key to wake".
   Reconnect behavior is unchanged (still auto-reconnects).
   ([#14](https://github.com/ReAI-com/reai-board-sdk/issues/14))
+- **Windows system-Bluetooth diagnosis.** On Windows the BLE session now looks
+  up boards that Windows itself has paired/connected (read-only WinRT query,
+  `runtime::ble::system_devices`) and, together with hidapi's Bluetooth-bus HID
+  entries, reports an `Error` event starting with `系统蓝牙占用：` instead of a
+  bare "not found" when the target stopped advertising because Windows holds
+  it. No behavior change on other platforms.
+- **`windows_diag` example.** Double-clickable, argument-free diagnostic that
+  writes `reai-board-diag-YYYYMMDD-HHMMSS.txt` (OS version, every VID 0x363C
+  HID entry, the USB `0x13` probe per candidate, BLE adapter / 10 s scan /
+  Windows-paired boards, one-line verdict).
+
+### Fixed
+
+- **USB device-info probe no longer fabricates data.** The post-connect `0x13`
+  probe parsed the buffer even when no matching reply arrived, producing
+  `chip_id=00000000` and a BLE target `REAI_VB_00000000` that can never be
+  found. It now follows the factory tool's timing (800 ms settle, 1.5 s per
+  try, up to 6 tries), accepts only report `0x0A` / cmd `0x13` / result `0x00`
+  with a full payload and non-zero chip id, and emits an `Error` event when it
+  gives up.
+- **USB interface selection ignores Bluetooth collections.** BLE and USB share
+  PID `0xED20`; on Windows a system-paired board also enumerates `0xFFA0`
+  collections on the Bluetooth bus. Config / Consumer / Audio / command
+  connections now only use USB-bus entries (`Unknown` as a fallback), prefer
+  usage `0x0002`, and move on to the next candidate when one fails.
+- **BLE name matching survives WinRT renames.** Matching checks both the
+  advertised name and `local_name` (btleplug's WinRT backend rewrites
+  `local_name` to the Windows cached name after connect).
+- **Windows BLE connect pacing.** 500 ms pause after scanning, 20 s
+  connect + discovery timeout, up to 3 attempts on the same scan result with
+  1 s / 2 s back-off. Other platforms keep the previous single 10 s attempt.
+- **README:** removed the incorrect "Windows needs a WinUSB / Zadig driver"
+  note — the SDK uses the inbox HID driver and WinUSB hides the board.
 
 ## [0.3.3] — 2026-09-08
 

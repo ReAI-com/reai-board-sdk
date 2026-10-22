@@ -39,7 +39,11 @@ usb = ["dep:hidapi", "dep:cpal", "dep:msbc-decoder"]
 # LGPL-2.1-or-later (it is a bit-exact translation of FFmpeg's SBC decoder).
 # The rest of this crate is MIT. See the `usb` note above — any transport that
 # carries board audio needs the decoder.
-ble = ["dep:btleplug", "dep:futures-util", "dep:msbc-decoder"]
+#
+# On Windows this also enables the `windows` crate (same 0.62 line btleplug
+# already pulls in) for a read-only WinRT query of system-paired boards; see
+# `runtime::ble::system_devices`.
+ble = ["dep:btleplug", "dep:futures-util", "dep:msbc-decoder", "dep:windows"]
 # System-level virtual microphone (macOS / Windows), off by default. macOS
 # builds the bundled CoreAudio HAL plugin; Windows consumes a developer-built,
 # test-signed WDK driver package. Enable together with `ble`.
@@ -72,6 +76,17 @@ futures-util = { version = "0.3", optional = true }
 # see the `usb` / `ble` feature comments.
 msbc-decoder = { version = "0.1", path = "msbc-decoder", optional = true }
 
+# Windows-only, read-only WinRT device enumeration for the `ble` feature
+# (finding boards Windows already paired/connected as a system keyboard). Same
+# major line as btleplug 0.12, so no second copy of the bindings is compiled.
+[target.'cfg(target_os = "windows")'.dependencies]
+windows = { version = "0.62", optional = true, features = [
+    "Devices_Bluetooth",
+    "Devices_Enumeration",
+    "Foundation",
+    "Foundation_Collections",
+] }
+
 [target.'cfg(target_os = "macos")'.dependencies]
 hidapi = { version = "2.6", features = ["macos-shared-device"], optional = true }
 
@@ -81,6 +96,8 @@ env_logger = "0.11"
 # Examples wait on Ctrl-C; `signal` is example-only so library consumers do not
 # pay for the signal driver.
 tokio = { version = "1", default-features = false, features = ["signal"] }
+# windows_diag example: local timestamp for the report file name.
+chrono = { version = "0.4", default-features = false, features = ["clock"] }
 
 [[example]]
 name = "virtual_mic_demo"
@@ -93,3 +110,7 @@ required-features = ["ble"]
 [[example]]
 name = "virtual_mic_loopback"
 required-features = ["usb", "virtual-mic"]
+
+[[example]]
+name = "windows_diag"
+required-features = ["usb", "ble"]

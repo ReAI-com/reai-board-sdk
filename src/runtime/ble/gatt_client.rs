@@ -45,6 +45,77 @@ const CCC_DESCRIPTOR_UUID: uuid::Uuid = uuid::Uuid::from_bytes([
     0x00, 0x00, 0x29, 0x02, 0x00, 0x00, 0x10, 0x00, 0x80, 0x00, 0x00, 0x80, 0x5f, 0x9b, 0x34, 0xfb,
 ]);
 
+/// 判断一条扫描结果是不是要找的 Vendor GATT 设备，返回命中的设备名。
+///
+/// 同时比对广播名（`advertisement_name`）与 `local_name`，任一命中即可：
+/// btleplug 的 WinRT 后端在 connect 之后会把 `local_name` 改写成 Windows
+/// 系统缓存的设备名，只看 `local_name` 会让重连时的精确匹配失败。
+/// - `target = Some(t)`：任一名字等于 `t` 即命中，返回 `t`；
+/// - `target = None`：取第一个带 `REAI_VB_` 前缀的名字（广播名优先）。
+pub fn match_vendor_name(
+    local_name: Option<&str>,
+    advertisement_name: Option<&str>,
+    target: Option<&str>,
+) -> Option<String> {
+    let names = [advertisement_name, local_name];
+    match target {
+        Some(t) => names
+            .iter()
+            .flatten()
+            .any(|n| *n == t)
+            .then(|| t.to_string()),
+        None => names
+            .iter()
+            .flatten()
+            .find(|n| n.starts_with(protocol::VENDOR_DEVICE_PREFIX))
+            .map(|n| n.to_string()),
+    }
+}
+
+/// BLE 连接节奏（对齐 webTest 在 Windows 上的经验）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct BleConnectPacing {
+    /// 扫描结束到发起连接之间的等待。
+    pub pre_connect_delay: std::time::Duration,
+    /// 「连接 + 服务发现 + 订阅」整体超时。
+    pub connect_timeout: std::time::Duration,
+    /// 同一个扫描结果最多连几次。
+    pub attempts: u32,
+    /// 第 1 次失败后的退避，之后每次翻倍。
+    pub first_backoff: std::time::Duration,
+}
+
+impl BleConnectPacing {
+    /// 当前平台的节奏。
+    ///
+    /// 非 Windows 保持原行为（不等待、10s 超时、只连一次，失败交回 hotplug 重扫）。
+    /// Windows：扫描后等 500ms 再连；WinRT 首连会做 Uncached 服务发现（每个服务
+    /// 最长 5s 才回落 Cached），超时放宽到 20s；同一个扫描结果最多连 3 次，
+    /// 退避 1s、2s——设备已不再广播时，重扫往往拿不回它。
+    pub const fn current() -> Self {
+        if cfg!(target_os = "windows") {
+            Self {
+                pre_connect_delay: std::time::Duration::from_millis(500),
+                connect_timeout: std::time::Duration::from_secs(20),
+                attempts: 3,
+                first_backoff: std::time::Duration::from_secs(1),
+            }
+        } else {
+            Self {
+                pre_connect_delay: std::time::Duration::ZERO,
+                connect_timeout: std::time::Duration::from_secs(10),
+                attempts: 1,
+                first_backoff: std::time::Duration::from_secs(1),
+            }
+        }
+    }
+
+    /// 第 `failed_attempt` 次（从 1 起）失败后、下一次之前的退避。
+    pub fn backoff_after(&self, failed_attempt: u32) -> std::time::Duration {
+        self.first_backoff * 2u32.saturating_pow(failed_attempt.saturating_sub(1).min(4))
+    }
+}
+
 /// BLE 扫描发现的设备信息(手动扫描/选择连接用)
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct BleDeviceInfo {
@@ -193,12 +264,11 @@ impl VendorGattClient {
 
             for p in &peripherals {
                 if let Ok(Some(props)) = p.properties().await {
-                    let name = props.local_name.unwrap_or_default();
-                    let matched = match &target {
-                        Some(t) => name == *t,
-                        None => name.starts_with(protocol::VENDOR_DEVICE_PREFIX),
-                    };
-                    if matched {
+                    if let Some(name) = match_vendor_name(
+                        props.local_name.as_deref(),
+                        props.advertisement_name.as_deref(),
+                        target.as_deref(),
+                    ) {
                         log::info!(target: "gatt", "发现 Vendor GATT 设备: {} ({})", name, p.id());
                         if let Err(e) = adapter.stop_scan().await {
                             log::warn!(target: "gatt", "stop_scan 失败(可能仍占用适配器): {}", e);
@@ -256,8 +326,11 @@ impl VendorGattClient {
 
             for p in &peripherals {
                 if let Ok(Some(props)) = p.properties().await {
-                    let name = props.local_name.unwrap_or_default();
-                    if name.starts_with(protocol::VENDOR_DEVICE_PREFIX) {
+                    if let Some(name) = match_vendor_name(
+                        props.local_name.as_deref(),
+                        props.advertisement_name.as_deref(),
+                        None,
+                    ) {
                         let id_str = format!("{:?}", p.id());
                         seen.entry(id_str.clone()).or_insert(BleDeviceInfo {
                             name: name.clone(),
@@ -322,13 +395,14 @@ impl VendorGattClient {
             })
         };
 
-        let found_chars =
-            match tokio::time::timeout(std::time::Duration::from_secs(10), inner).await {
-                Ok(r) => r,
-                Err(_) => Err(anyhow::anyhow!(
-                    "BLE connect 超时(10s)— 可能 CoreBluetooth Event receiver died,将重试"
-                )),
-            }?;
+        let connect_timeout = BleConnectPacing::current().connect_timeout;
+        let found_chars = match tokio::time::timeout(connect_timeout, inner).await {
+            Ok(r) => r,
+            Err(_) => Err(anyhow::anyhow!(
+                "BLE connect 超时({}s)— 可能 CoreBluetooth Event receiver died 或 WinRT 服务发现卡住,将重试",
+                connect_timeout.as_secs()
+            )),
+        }?;
 
         *self.peripheral.lock().unwrap() = Some(peripheral.clone());
         *self.chars.lock().unwrap() = Some(found_chars);
@@ -337,6 +411,51 @@ impl VendorGattClient {
         self.running.store(true, Ordering::SeqCst);
 
         Ok(())
+    }
+
+    /// 按 [`BleConnectPacing::current`] 的节奏连接：先等一下，失败后退避重试。
+    ///
+    /// 非 Windows 等价于直接调用一次 [`connect`](Self::connect)。
+    /// `still_wanted` 在每次尝试前调用；返回 `false`（目标被取消/切换、管理器停止）
+    /// 时放弃并返回错误，避免退避结束后连上一个已经不要的设备。
+    pub async fn connect_with_retry(
+        &self,
+        peripheral: &Peripheral,
+        still_wanted: &(dyn Fn() -> bool + Send + Sync),
+    ) -> Result<()> {
+        let pacing = BleConnectPacing::current();
+        if !pacing.pre_connect_delay.is_zero() {
+            tokio::time::sleep(pacing.pre_connect_delay).await;
+        }
+        let mut attempt = 1;
+        loop {
+            if !still_wanted() {
+                return Err(anyhow::anyhow!("BLE 目标已取消或改变，放弃连接"));
+            }
+            match self.connect(peripheral).await {
+                Ok(()) => return Ok(()),
+                Err(e) if attempt < pacing.attempts => {
+                    let backoff = pacing.backoff_after(attempt);
+                    log::warn!(
+                        target: "gatt",
+                        "BLE 连接第 {}/{} 次失败: {}，{}ms 后重试",
+                        attempt,
+                        pacing.attempts,
+                        e,
+                        backoff.as_millis()
+                    );
+                    // 半截连接（已连上但服务发现超时）先断开，下一次从干净状态开始。
+                    let _ = tokio::time::timeout(
+                        std::time::Duration::from_secs(3),
+                        peripheral.disconnect(),
+                    )
+                    .await;
+                    tokio::time::sleep(backoff).await;
+                    attempt += 1;
+                }
+                Err(e) => return Err(e),
+            }
+        }
     }
 
     /// 写入命令到 Command 特征值(5s 超时)
@@ -803,7 +922,9 @@ fn handle_event(
             // 不在此置 ble_auto_connect=false —— 那会导致设备关机重启后无法自动重连。
             // hotplug 通过扫描失败上限兜底永久离开。
             let reason = payload.first().copied().unwrap_or(0).max(1);
-            state.device_disconnect_reason.store(reason, Ordering::SeqCst);
+            state
+                .device_disconnect_reason
+                .store(reason, Ordering::SeqCst);
             log::info!(
                 target: "gatt",
                 "[GATT] 收到设备主动断开通知 (CMD=0x60, reason=0x{reason:02X}),断开上报将标记 DeviceDisconnect"
@@ -811,6 +932,85 @@ fn handle_event(
         }
         _ => {
             log::debug!(target: "gatt", "[GATT] 未处理 Event CMD=0x{:02X}", cmd);
+        }
+    }
+}
+
+#[cfg(test)]
+mod name_and_pacing_tests {
+    use super::*;
+
+    #[test]
+    fn target_matches_either_advertised_or_local_name() {
+        // WinRT connect 后 local_name 被改成系统名，广播名仍是 REAI_VB_*。
+        assert_eq!(
+            match_vendor_name(
+                Some("ReAI Board"),
+                Some("REAI_VB_1A2B3C4D"),
+                Some("REAI_VB_1A2B3C4D")
+            ),
+            Some("REAI_VB_1A2B3C4D".into())
+        );
+        assert_eq!(
+            match_vendor_name(Some("REAI_VB_1A2B3C4D"), None, Some("REAI_VB_1A2B3C4D")),
+            Some("REAI_VB_1A2B3C4D".into())
+        );
+        assert_eq!(
+            match_vendor_name(
+                Some("REAI_VB_1A2B3C4D"),
+                Some("REAI_VB_1A2B3C4D"),
+                Some("REAI_VB_FFFFFFFF")
+            ),
+            None
+        );
+        assert_eq!(
+            match_vendor_name(None, None, Some("REAI_VB_1A2B3C4D")),
+            None
+        );
+    }
+
+    #[test]
+    fn prefix_scan_prefers_the_advertised_name() {
+        assert_eq!(
+            match_vendor_name(Some("Keyboard"), Some("REAI_VB_00C0FFEE"), None),
+            Some("REAI_VB_00C0FFEE".into())
+        );
+        assert_eq!(
+            match_vendor_name(Some("REAI_VB_00C0FFEE"), Some("Other"), None),
+            Some("REAI_VB_00C0FFEE".into())
+        );
+        assert_eq!(match_vendor_name(Some("Mouse"), Some("Other"), None), None);
+    }
+
+    #[test]
+    fn pacing_backoff_doubles_and_is_capped() {
+        let pacing = BleConnectPacing {
+            pre_connect_delay: std::time::Duration::ZERO,
+            connect_timeout: std::time::Duration::from_secs(20),
+            attempts: 3,
+            first_backoff: std::time::Duration::from_secs(1),
+        };
+        assert_eq!(pacing.backoff_after(1), std::time::Duration::from_secs(1));
+        assert_eq!(pacing.backoff_after(2), std::time::Duration::from_secs(2));
+        assert_eq!(
+            pacing.backoff_after(100),
+            std::time::Duration::from_secs(16)
+        );
+    }
+
+    #[test]
+    fn non_windows_pacing_keeps_the_previous_behaviour() {
+        let pacing = BleConnectPacing::current();
+        if cfg!(target_os = "windows") {
+            assert_eq!(pacing.attempts, 3);
+            assert_eq!(
+                pacing.pre_connect_delay,
+                std::time::Duration::from_millis(500)
+            );
+        } else {
+            assert_eq!(pacing.attempts, 1);
+            assert!(pacing.pre_connect_delay.is_zero());
+            assert_eq!(pacing.connect_timeout, std::time::Duration::from_secs(10));
         }
     }
 }

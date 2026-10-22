@@ -47,13 +47,20 @@ impl UsbVendorAudioReader {
         // Config monitor. The returned handle is then owned exclusively by the audio thread.
         let device = spawn_blocking_with_runloop(move || -> Result<hidapi::HidDevice> {
             let api = hidapi::HidApi::new()?;
+            // 只认 USB 一侧（USB 优先、Unknown 兜底）：Windows 上系统配对的蓝牙键盘
+            // 同 PID，也会枚举出 0xFFAA 集合。
             let info = api
                 .device_list()
-                .find(|device| {
+                .filter(|device| {
                     device.vendor_id() == VID
                         && is_target_pid(device.product_id())
                         && device.usage_page() == USAGE_PAGE_AUDIO
+                        && matches!(
+                            device.bus_type(),
+                            hidapi::BusType::Usb | hidapi::BusType::Unknown
+                        )
                 })
+                .min_by_key(|device| !matches!(device.bus_type(), hidapi::BusType::Usb))
                 .ok_or_else(|| {
                     anyhow!("未找到 USB Vendor Audio HID 接口 (VID={VID:#06x}, PID={PID_USB:#06x})")
                 })?;

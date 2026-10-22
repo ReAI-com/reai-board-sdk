@@ -1842,25 +1842,9 @@ struct UsbCommandConnection {
 impl UsbCommandConnection {
     fn open() -> Result<Self> {
         let api = hidapi::HidApi::new()?;
-        let device = {
-            let dev_info = api
-                .device_list()
-                .find(|device| {
-                    device.vendor_id() == VID
-                        && is_target_pid(device.product_id())
-                        && device.usage_page() == USAGE_PAGE_CONFIG
-                        && device.usage() == 0x0002
-                })
-                .or_else(|| {
-                    api.device_list().find(|device| {
-                        device.vendor_id() == VID
-                            && is_target_pid(device.product_id())
-                            && device.usage_page() == USAGE_PAGE_CONFIG
-                    })
-                })
-                .ok_or_else(|| anyhow::anyhow!("未找到 Config 接口"))?;
-            api.open_path(dev_info.path())?
-        };
+        // 只认 USB 总线（Unknown 兜底）、usage==0x0002 优先，打不开换下一个；
+        // Windows 上系统配对的蓝牙键盘同 PID、同 0xFFA0，不能被当成命令通道。
+        let (device, _) = crate::runtime::usb::probe::open_first_config_candidate(&api)?;
         Ok(Self { device, _api: api })
     }
 }

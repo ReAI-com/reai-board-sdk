@@ -35,6 +35,8 @@ use {
 
 #[cfg(feature = "ble")]
 use crate::runtime::ble::gatt_client::VendorGattClient;
+#[cfg(feature = "usb")]
+use crate::runtime::usb::probe::{self, ProbeTiming};
 
 // ============ CFRunLoop 辅助（macOS hidapi 兼容） ============
 
@@ -326,26 +328,46 @@ enum BlePreemptionCheck {
     NeedsFullCheck,
 }
 
-/// 扫描目标设备在 HID 侧的总线分布,返回 `(有 USB 总线的, 有未知总线的)`。
+/// 目标设备在 HID 侧的总线分布。
+#[cfg(feature = "usb")]
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+struct TargetHidBuses {
+    usb: bool,
+    unknown: bool,
+    /// 系统蓝牙连着的同款键盘（BLE 与 USB 同 PID）。不参与 USB 判定，
+    /// 只用于 Windows 上「设备被系统蓝牙占用」的诊断提示。
+    bluetooth: bool,
+}
+
+/// 扫描目标设备在 HID 侧的总线分布。
 ///
 /// 完整检测与 BLE 抢占检测共用同一份枚举与过滤条件,避免两处各写一遍后随时间
-/// 漂移出不同的设备识别口径。蓝牙/I2C/SPI 总线上的目标设备不计入——那是当前
-/// 这条 BLE 连接自己,不能当成「USB 插上了」。
+/// 漂移出不同的设备识别口径。蓝牙/I2C/SPI 总线上的目标设备不计入 USB——那是
+/// 系统蓝牙或当前这条 BLE 连接自己,不能当成「USB 插上了」。
 #[cfg(feature = "usb")]
-fn scan_target_hid_buses(api: &HidApi) -> (bool, bool) {
-    let mut has_usb_hid = false;
-    let mut has_unknown_hid = false;
+fn scan_target_hid_buses(api: &HidApi) -> TargetHidBuses {
+    let mut buses = TargetHidBuses::default();
     for device in api
         .device_list()
         .filter(|d| d.vendor_id() == VID && is_target_pid(d.product_id()))
     {
         match device.bus_type() {
-            BusType::Usb => has_usb_hid = true,
-            BusType::Unknown => has_unknown_hid = true,
-            BusType::Bluetooth | BusType::I2c | BusType::Spi => {}
+            BusType::Usb => buses.usb = true,
+            BusType::Unknown => buses.unknown = true,
+            BusType::Bluetooth => buses.bluetooth = true,
+            BusType::I2c | BusType::Spi => {}
         }
     }
-    (has_usb_hid, has_unknown_hid)
+    buses
+}
+
+/// 一次 HID 检测的结果：USB 判定 + 是否看到蓝牙总线上的同款键盘。
+#[cfg(feature = "usb")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct HidScan {
+    connection: Option<ConnectionType>,
+    #[cfg_attr(not(target_os = "windows"), allow(dead_code))]
+    bluetooth: bool,
 }
 
 /// BLE 抢占专用的 USB 判定:只要目标 HID 出现就该切走。
@@ -419,7 +441,7 @@ pub struct HotplugManager {
     #[cfg(feature = "usb")]
     on_monitor_ready: Option<OnMonitorReady>,
     #[cfg(feature = "ble")]
-    /// BLE GATT 客户端的共享槽（与 BoardDeviceCore 同一个 Arc<Mutex>）。
+    /// BLE GATT 客户端的共享槽（与 BoardDeviceCore 同一个 `Arc<Mutex>`）。
     /// 初始为 None——由 [`ensure_client`] 在首次进入 BLE 路径时延迟填充。
     vendor_gatt_client_slot: Arc<Mutex<Option<Arc<VendorGattClient>>>>,
     #[cfg(feature = "ble")]
@@ -430,6 +452,9 @@ pub struct HotplugManager {
     ble_auto_connect: Arc<AtomicBool>,
     #[cfg(feature = "ble")]
     on_ble_device_name_updated: Option<OnBleDeviceNameUpdated>,
+    /// Windows「被系统蓝牙占用」提示是否已报过（条件消失后复位）。
+    #[cfg_attr(not(all(feature = "usb", target_os = "windows")), allow(dead_code))]
+    system_bluetooth_reported: AtomicBool,
 }
 
 impl HotplugManager {
@@ -452,6 +477,7 @@ impl HotplugManager {
             ble_auto_connect: Arc::new(AtomicBool::new(true)),
             #[cfg(feature = "ble")]
             on_ble_device_name_updated: None,
+            system_bluetooth_reported: AtomicBool::new(false),
         }
     }
 
@@ -577,7 +603,16 @@ impl HotplugManager {
     /// 检测可用连接(USB 优先,BLE 次之)
     async fn detect_connection(&self) -> Option<ConnectionType> {
         // 第1优先级:USB(阻塞枚举,spawn_blocking)
-        #[cfg(feature = "usb")]
+        // Windows 额外用同一次枚举看「同款键盘是否正连着系统蓝牙」,给出可诊断提示。
+        #[cfg(all(feature = "usb", target_os = "windows"))]
+        {
+            let scan = Self::scan_hid_async().await;
+            if let Some(ct) = scan.and_then(|s| s.connection) {
+                return Some(ct);
+            }
+            self.maybe_report_system_bluetooth(scan.map(|s| s.bluetooth).unwrap_or(false));
+        }
+        #[cfg(all(feature = "usb", not(target_os = "windows")))]
         if let Some(ct) = Self::detect_hid_connection_async().await {
             return Some(ct);
         }
@@ -597,6 +632,70 @@ impl HotplugManager {
 
         #[allow(unreachable_code)]
         None
+    }
+
+    /// Windows:没有可连的 USB、也没有 BLE 目标，但 hidapi 看到同款键盘挂在系统蓝牙上时，
+    /// 上报一次「被系统蓝牙占用」（条件消失后复位，再次出现会再报）。
+    ///
+    /// 有 BLE 目标时不在这里报——扫描失败的分支会给出带设备名的更精确提示。
+    #[cfg(all(feature = "usb", target_os = "windows"))]
+    fn maybe_report_system_bluetooth(&self, hid_over_bluetooth: bool) {
+        #[cfg(feature = "ble")]
+        let has_target = self.ble_last_device_name.lock().unwrap().is_some();
+        #[cfg(not(feature = "ble"))]
+        let has_target = false;
+
+        if !hid_over_bluetooth || has_target {
+            self.system_bluetooth_reported
+                .store(false, Ordering::SeqCst);
+            return;
+        }
+        if self.system_bluetooth_reported.swap(true, Ordering::SeqCst) {
+            return;
+        }
+        #[cfg(feature = "ble")]
+        let hint = crate::runtime::ble::system_devices::system_occupied_hint(None, &[], true);
+        #[cfg(not(feature = "ble"))]
+        let hint =
+            Some("系统蓝牙占用：检测到同款键盘正通过系统蓝牙（HID）连接；USB 未连接。".to_string());
+        if let Some(hint) = hint {
+            log::warn!(target: "hotplug", "{}", hint);
+            self.emit_error(hint, true);
+        }
+    }
+
+    /// BLE 扫描失败时，查一下目标是不是被系统蓝牙占着（仅 Windows 有结论）。
+    #[cfg(feature = "ble")]
+    async fn system_bluetooth_hint(&self, target: Option<&str>) -> Option<String> {
+        #[cfg(target_os = "windows")]
+        {
+            use crate::runtime::ble::system_devices;
+            // 有总时限：WinRT 无线设备枚举偶尔很慢，不能让它拖住重连主循环。
+            let system = match system_devices::list_system_vendor_devices(
+                system_devices::DEFAULT_QUERY_TIMEOUT,
+            )
+            .await
+            {
+                Ok(list) => list,
+                Err(e) => {
+                    log::warn!(target: "hotplug", "{}", e);
+                    Vec::new()
+                }
+            };
+            #[cfg(feature = "usb")]
+            let hid_over_bluetooth = Self::scan_hid_async()
+                .await
+                .map(|s| s.bluetooth)
+                .unwrap_or(false);
+            #[cfg(not(feature = "usb"))]
+            let hid_over_bluetooth = false;
+            system_devices::system_occupied_hint(target, &system, hid_over_bluetooth)
+        }
+        #[cfg(not(target_os = "windows"))]
+        {
+            let _ = target;
+            None
+        }
     }
 
     // ================================================================
@@ -630,8 +729,8 @@ impl HotplugManager {
     #[cfg(feature = "usb")]
     fn check_usb_preemption() -> BlePreemptionCheck {
         let decision = with_reused_hid_api(|api| {
-            let (has_usb_hid, has_unknown_hid) = scan_target_hid_buses(api);
-            decide_ble_preemption(has_usb_hid, has_unknown_hid)
+            let buses = scan_target_hid_buses(api);
+            decide_ble_preemption(buses.usb, buses.unknown)
         });
 
         ble_preemption_from_hid(decision)
@@ -641,20 +740,37 @@ impl HotplugManager {
     /// enumerate or open OS audio endpoints; an explicit UAC compatibility request owns that.
     #[cfg(feature = "usb")]
     fn detect_hid_connection() -> Option<ConnectionType> {
-        let hid_decision = with_reused_hid_api(|api| {
-            let (has_usb_hid, has_unknown_hid) = scan_target_hid_buses(api);
+        Self::scan_hid().and_then(|scan| scan.connection)
+    }
 
-            match decide_hid_detection(has_usb_hid, has_unknown_hid) {
+    /// 异步包装 [`Self::scan_hid`]。
+    #[cfg(feature = "usb")]
+    #[cfg_attr(not(target_os = "windows"), allow(dead_code))]
+    async fn scan_hid_async() -> Option<HidScan> {
+        spawn_blocking_with_runloop(Self::scan_hid)
+            .await
+            .ok()
+            .flatten()
+    }
+
+    /// 阻塞:一次枚举同时给出 USB 判定与蓝牙总线线索。`None` = HidApi 不可用。
+    #[cfg(feature = "usb")]
+    fn scan_hid() -> Option<HidScan> {
+        with_reused_hid_api(|api| {
+            let buses = scan_target_hid_buses(api);
+            let connection = match decide_hid_detection(buses.usb, buses.unknown) {
                 HidDetectionDecision::Connected => Some(ConnectionType::Usb),
                 HidDetectionDecision::ProbeMode => match Self::probe_device_mode(api) {
                     Some(3) => Some(ConnectionType::Usb),
                     _ => None,
                 },
                 HidDetectionDecision::NotConnected => None,
+            };
+            HidScan {
+                connection,
+                bluetooth: buses.bluetooth,
             }
-        });
-
-        hid_decision.flatten()
+        })
     }
 
     // ================================================================
@@ -732,23 +848,29 @@ impl HotplugManager {
         // USB 连接成功 → 读完整设备信息（fresh HidApi，带 CFRunLoop 的线程）。
         // 1) chip_id → 推导 BLE 名 REAI_VB_{chip_id} → set_ble_target（USB 拔出后精确连同一设备）
         // 2) 广播 BoardEvent::DeviceInfo（消费者据此展示，无需手动 read）
-        // 读不到非致命，跳过即可，不影响连接主线。
-        if let Some(info) = spawn_blocking_with_runloop(|| {
-            HidApi::new()
-                .ok()
-                .and_then(|api| Self::probe_usb_device_info(&api))
-        })
-        .await
-        .ok()
-        .flatten()
-        {
-            #[cfg(feature = "ble")]
-            {
-                let ble_name = format!("REAI_VB_{}", info.chip_id);
-                log::info!(target: "hotplug", "USB 读到 chip_id={} → BLE 目标 {}", info.chip_id, ble_name);
-                self.set_ble_target(Some(&ble_name));
+        // 按 webTest 的节奏：打开后等 800ms，0x13 每次等 1.5s、最多 6 次，只认校验过的应答；
+        // 读不到就明确上报错误，绝不拿未校验的数据推导 BLE 目标。不影响 USB 按键主线。
+        let probe = self.probe_usb_device_info_paced().await;
+        match probe {
+            Ok(info) => {
+                #[cfg(feature = "ble")]
+                {
+                    let ble_name = format!("REAI_VB_{}", info.chip_id);
+                    log::info!(target: "hotplug", "USB 读到 chip_id={} → BLE 目标 {}", info.chip_id, ble_name);
+                    self.set_ble_target(Some(&ble_name));
+                }
+                let _ = self.event_tx.send(BoardEvent::DeviceInfo(info));
             }
-            let _ = self.event_tx.send(BoardEvent::DeviceInfo(info));
+            Err(None) => {}
+            Err(Some(detail)) => {
+                log::warn!(target: "hotplug", "USB 设备信息读取失败: {}", detail);
+                self.emit_error(
+                    format!(
+                        "USB 已连接，但读取设备信息（CMD 0x13）失败，BLE 回连目标未更新；请拔插 USB 后重试。详情: {detail}"
+                    ),
+                    true,
+                );
+            }
         }
 
         let reason = self.monitor_hid_while_connected(&monitor).await;
@@ -821,8 +943,17 @@ impl HotplugManager {
                 (p, name)
             }
             Err(e) => {
-                log::warn!(target: "hotplug", "BLE 扫描未发现设备: {}", e);
-                self.emit_error(format!("BLE 扫描未发现设备: {e}"), true);
+                // Windows：目标常常是被系统蓝牙配对/连着，停止广播了——说清楚该怎么办。
+                match self.system_bluetooth_hint(target.as_deref()).await {
+                    Some(hint) => {
+                        log::warn!(target: "hotplug", "BLE 扫描未发现设备: {}；{}", e, hint);
+                        self.emit_error(hint, true);
+                    }
+                    None => {
+                        log::warn!(target: "hotplug", "BLE 扫描未发现设备: {}", e);
+                        self.emit_error(format!("BLE 扫描未发现设备: {e}"), true);
+                    }
+                }
                 tokio::time::sleep(Duration::from_secs(5)).await;
                 return;
             }
@@ -844,10 +975,31 @@ impl HotplugManager {
 
         // 2. 连接
         self.emit_reconnect(ReconnectState::Connecting, None, None);
-        if let Err(e) = client.connect(&peripheral).await {
+        // Windows：扫描后稍等再连，失败按退避重试同一个扫描结果；其他平台只连一次。
+        // 退避期间用户可能断开/切换目标或停止管理器：每次尝试前都重新确认。
+        let still_wanted = {
+            let target = self.ble_last_device_name.clone();
+            let auto = self.ble_auto_connect.clone();
+            let running = self.running.clone();
+            let stop = self.stop_requested.clone();
+            let name = found_name.clone();
+            move || {
+                running.load(Ordering::SeqCst)
+                    && stop.as_ref().is_none_or(|f| f.load(Ordering::SeqCst))
+                    && auto.load(Ordering::SeqCst)
+                    && target.lock().unwrap().as_deref() == Some(name.as_str())
+            }
+        };
+        if let Err(e) = client.connect_with_retry(&peripheral, &still_wanted).await {
             log::warn!(target: "hotplug", "BLE 连接失败: {},5s 后重试", e);
             self.emit_error(format!("BLE 连接失败: {e}"), true);
             tokio::time::sleep(Duration::from_secs(5)).await;
+            return;
+        }
+
+        if !still_wanted() {
+            log::info!(target: "hotplug", "BLE 连接完成时目标已取消或改变，断开 {}", found_name);
+            let _ = client.disconnect().await;
             return;
         }
 
@@ -935,89 +1087,93 @@ impl HotplugManager {
     // CMD 0x13 探测设备模式
     // ================================================================
 
+    /// 只在 hidapi 判不出总线时调用：对 USB 侧 Config 候选单次发 0x13，
+    /// 只认校验通过的应答（report id / cmd / result / chip_id）。
     #[cfg(feature = "usb")]
     fn probe_device_mode(api: &HidApi) -> Option<u8> {
-        let config_devices: Vec<_> = api
-            .device_list()
-            .filter(|d| {
-                d.vendor_id() == VID
-                    && is_target_pid(d.product_id())
-                    && d.usage_page() == USAGE_PAGE_CONFIG
-            })
-            .collect();
-
-        let target = config_devices
-            .iter()
-            .find(|d| d.usage() == 0x0002)
-            .or_else(|| config_devices.first())?;
-
-        let device = api.open_path(target.path()).ok()?;
-
-        let cmd = HidPacket::get_device_info();
-        device.write(&cmd).ok()?;
-
-        let mut buf = [0u8; 64];
-        for attempt in 0..10 {
-            match device.read_timeout(&mut buf, 200) {
-                Ok(n) if n >= 5 && buf[1] == CMD_GET_DEVICE_INFO => {
-                    let mode = buf[4];
-                    log::debug!(target: "hid", "CMD 0x13 探测成功: mode={} (skip={})", mode, attempt);
-                    return Some(mode);
-                }
-                Ok(_) => continue,
-                Err(_) => return None,
-            }
+        let (info, records) = probe::probe_device_info_any(api, ProbeTiming::QUICK);
+        if info.is_none() {
+            log::debug!(
+                target: "hid",
+                "CMD 0x13 模式探测失败: {}",
+                probe::describe_probe_records(&records)
+            );
         }
-        None
+        info.map(|i| i.mode)
     }
 
     /// CMD 0x13 探测完整设备信息（USB）。
     ///
-    /// 比 [`probe_device_mode`] 多解析 chip_id 等字段，用于 USB 连接后：
+    /// 用于 USB 连接后：
     /// 1. 推导 BLE 设备名 `REAI_VB_{chip_id}` → [`set_ble_target`](Self::set_ble_target)
     /// 2. 广播 `BoardEvent::DeviceInfo`（消费者据此展示，无需手动 read）
     ///
-    /// 读不到（非致命）→ 返回 None，调用方跳过推导/广播，不影响连接主线。
+    /// 节奏由 async 侧编排（[`ProbeTiming::CONNECT`]：先等 800ms，最多 6 轮，每轮每个候选
+    /// 等 1.5s）。每轮只向 HID 线程投递一个短任务——macOS 上所有 HID 操作排在同一条
+    /// RunLoop 线程，整段 10 秒的同步重试会把命令通道一起堵住；轮与轮之间检查停止请求。
+    /// 候选按 USB 总线 + usage 0x0002 排序；全部失败时返回可读的失败明细。
     #[cfg(feature = "usb")]
-    fn probe_usb_device_info(api: &HidApi) -> Option<DeviceInfo> {
-        let config_devices: Vec<_> = api
-            .device_list()
-            .filter(|d| {
-                d.vendor_id() == VID
-                    && is_target_pid(d.product_id())
-                    && d.usage_page() == USAGE_PAGE_CONFIG
+    ///
+    /// 返回 `Err(None)` 表示探测期间 USB 已拔出（没有任何候选）或管理器已停止，调用方不必报错。
+    async fn probe_usb_device_info_paced(&self) -> std::result::Result<DeviceInfo, Option<String>> {
+        let pacing = ProbeTiming::CONNECT;
+        let per_round = ProbeTiming {
+            settle_delay: Duration::ZERO,
+            attempts: 1,
+            ..pacing
+        };
+        tokio::time::sleep(pacing.settle_delay).await;
+        let mut last_detail = String::new();
+        for round in 1..=pacing.attempts {
+            if !self.running.load(Ordering::SeqCst) || self.is_stop_requested() {
+                return Err(None);
+            }
+            let result = spawn_blocking_with_runloop(move || match HidApi::new() {
+                Ok(api) => {
+                    let (info, records) = probe::probe_device_info_any(&api, per_round);
+                    match info {
+                        Some(info) => Ok(info),
+                        // 一个候选都没有：设备已拔出
+                        None if records.is_empty() => Err(None),
+                        None => Err(Some(probe::describe_probe_records(&records))),
+                    }
+                }
+                Err(e) => Err(Some(format!("HidApi 创建失败: {e}"))),
             })
-            .collect();
-
-        let target = config_devices
-            .iter()
-            .find(|d| d.usage() == 0x0002)
-            .or_else(|| config_devices.first())?;
-
-        let device = api.open_path(target.path()).ok()?;
-
-        let cmd = HidPacket::get_device_info();
-        device.write(&cmd).ok()?;
-
-        let mut buf = [0u8; 64];
-        for _ in 0..10 {
-            match device.read_timeout(&mut buf, 200) {
-                Ok(n) if n >= 5 && buf[1] == CMD_GET_DEVICE_INFO => break,
-                Ok(_) => continue,
-                Err(_) => return None,
+            .await
+            .unwrap_or_else(|_| Err(Some("HID 线程崩溃".to_string())));
+            match result {
+                Ok(info) => {
+                    log::debug!(
+                        target: "hid",
+                        "CMD 0x13 完整探测（第 {} 轮）: chip_id={} fw={} battery={}%",
+                        round,
+                        info.chip_id,
+                        info.firmware_version,
+                        info.battery_level
+                    );
+                    return Ok(info);
+                }
+                Err(None) => {
+                    log::debug!(target: "hid", "CMD 0x13 探测期间 USB Config 接口已消失");
+                    return Err(None);
+                }
+                Err(Some(detail)) => {
+                    log::debug!(
+                        target: "hid",
+                        "CMD 0x13 第 {}/{} 轮无有效应答: {}",
+                        round,
+                        pacing.attempts,
+                        detail
+                    );
+                    last_detail = detail;
+                }
             }
         }
-        // USB payload_offset = 4（Report ID + CMD + LEN + result）
-        let info =
-            crate::tool::parse::parse_device_info_from_buf(&buf, 4, ConnectionType::Usb).ok()?;
-        log::debug!(
-            target: "hid",
-            "CMD 0x13 完整探测: chip_id={} fw={} battery={}%",
-            info.chip_id,
-            info.firmware_version,
-            info.battery_level
-        );
-        Some(info)
+        Err(Some(format!(
+            "{} 轮均失败，最后一轮: {}",
+            pacing.attempts, last_detail
+        )))
     }
 
     // ================================================================

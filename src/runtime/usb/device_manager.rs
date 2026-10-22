@@ -48,6 +48,31 @@ impl DeviceConnection {
     }
 }
 
+/// 按顺序尝试打开候选，返回第一个成功的条目与句柄；全部失败时汇总错误。
+fn open_first<'a>(
+    api: &HidApi,
+    candidates: &[&'a DeviceInfo],
+) -> std::result::Result<(&'a DeviceInfo, HidDevice), String> {
+    let mut errors = Vec::new();
+    for info in candidates {
+        match api.open_path(info.path()) {
+            Ok(device) => return Ok((info, device)),
+            Err(e) => {
+                log::warn!(
+                    target: "hid",
+                    "打开接口失败 usage=0x{:04X}:0x{:04X} bus={:?}，尝试下一个: {}",
+                    info.usage_page(),
+                    info.usage(),
+                    info.bus_type(),
+                    e
+                );
+                errors.push(e.to_string());
+            }
+        }
+    }
+    Err(errors.join("; "))
+}
+
 /// HID 设备管理器
 pub struct DeviceManager {
     hid_api: HidApi,
@@ -77,6 +102,22 @@ impl DeviceManager {
             .device_list()
             .filter(|d| d.vendor_id() == VID && is_target_pid(d.product_id()))
             .collect()
+    }
+
+    /// 只取 USB 一侧的条目（USB 或判不出总线的 Unknown），USB 总线排在前面。
+    ///
+    /// BLE 与 USB 同 PID（0xED20）。Windows 上系统配对过的蓝牙键盘也会以
+    /// `BusType::Bluetooth` 的 HID 集合出现在枚举里，usage_page 与 USB 相同；
+    /// 不按总线过滤就可能把 USB 会话的 monitor 接到蓝牙集合上。
+    fn enumerate_usb_side_devices(&self) -> Vec<&DeviceInfo> {
+        let mut devices: Vec<&DeviceInfo> = self
+            .enumerate_devices()
+            .into_iter()
+            .filter(|d| matches!(d.bus_type(), BusType::Usb | BusType::Unknown))
+            .collect();
+        // 稳定排序：USB 在前，Unknown 兜底
+        devices.sort_by_key(|d| !matches!(d.bus_type(), BusType::Usb));
+        devices
     }
 
     /// 检测设备是否物理存在(不依赖已打开的连接)
@@ -112,27 +153,25 @@ impl DeviceManager {
         None
     }
 
-    /// 连接指定 Usage Page + Usage 的接口(用于 BLE 设备精确选择)
+    /// 连接指定 Usage Page + Usage 的 USB 接口（排除蓝牙总线；打不开换下一个）
     pub fn connect_usage_page_and_usage(
         &mut self,
         usage_page: u16,
         usage: u16,
     ) -> Result<DeviceConnection> {
-        let dev_info = self
-            .enumerate_devices()
+        let candidates: Vec<&DeviceInfo> = self
+            .enumerate_usb_side_devices()
             .into_iter()
-            .find(|d| d.usage_page() == usage_page && d.usage() == usage)
-            .ok_or_else(|| {
-                anyhow!(
-                    "未找到 Usage Page=0x{:04X}, Usage=0x{:04X} 的接口",
-                    usage_page,
-                    usage
-                )
-            })?;
-
-        let device = self
-            .hid_api
-            .open_path(dev_info.path())
+            .filter(|d| d.usage_page() == usage_page && d.usage() == usage)
+            .collect();
+        if candidates.is_empty() {
+            return Err(anyhow!(
+                "未找到 Usage Page=0x{:04X}, Usage=0x{:04X} 的 USB 接口",
+                usage_page,
+                usage
+            ));
+        }
+        let (dev_info, device) = open_first(&self.hid_api, &candidates)
             .map_err(|e| anyhow!("打开接口失败 (0x{:04X}:0x{:04X}): {}", usage_page, usage, e))?;
 
         device.set_blocking_mode(false).ok();
@@ -154,17 +193,20 @@ impl DeviceManager {
         Ok(conn)
     }
 
-    /// 连接指定 Usage Page 的接口
+    /// 连接指定 Usage Page 的 USB 接口（排除蓝牙总线；打不开换下一个）
     pub fn connect_usage_page(&mut self, usage_page: u16) -> Result<DeviceConnection> {
-        let dev_info = self
-            .enumerate_devices()
+        let candidates: Vec<&DeviceInfo> = self
+            .enumerate_usb_side_devices()
             .into_iter()
-            .find(|d| d.usage_page() == usage_page)
-            .ok_or_else(|| anyhow!("未找到 Usage Page=0x{:04X} 的接口", usage_page))?;
-
-        let device = self
-            .hid_api
-            .open_path(dev_info.path())
+            .filter(|d| d.usage_page() == usage_page)
+            .collect();
+        if candidates.is_empty() {
+            return Err(anyhow!(
+                "未找到 Usage Page=0x{:04X} 的 USB 接口",
+                usage_page
+            ));
+        }
+        let (dev_info, device) = open_first(&self.hid_api, &candidates)
             .map_err(|e| anyhow!("打开接口失败 (0x{:04X}): {}", usage_page, e))?;
 
         device.set_blocking_mode(false).ok(); // 非阻塞
