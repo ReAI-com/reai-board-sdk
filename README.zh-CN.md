@@ -133,7 +133,7 @@ MIT Flutter 包不会直接捆绑 LGPL mSBC 解码器，只输出编码帧和连
 |-----------|------|--------------------------------------------------------------|
 | macOS     | CI 已验证 | `hidapi` 用 `macos-shared-device` feature                |
 | Linux     | CI 可编译 | 需装 `libdbus-1-dev libudev-dev libasound2-dev pkg-config`；原生 HID 可能还要 `udev` 规则 |
-| Windows   | 预期可用，**尚未验证** | 原生 HID 需要 WinUSB / Zadig 驱动             |
+| Windows   | CI 可编译，真机验证进行中 | 用系统自带 HID 驱动，**不要**装 WinUSB / Zadig（会替换 HID 驱动，`hidapi` 反而看不到键盘），见 [Windows 注意事项](#windows-注意事项) |
 | iOS       | Flutter CI 已验证，硬件待测 | Flutter 包，仅 CoreBluetooth BLE         |
 | Android   | Flutter CI 已验证，硬件待测 | Flutter 包，仅 Android GATT              |
 
@@ -143,6 +143,17 @@ iOS/Android 使用独立 Flutter BLE 包，不提供 USB。Windows 和手机硬�
 
 `ble` 用 `btleplug 0.12`（原生 async）。macOS 上首次 `start()` 可能要等 ~40 秒
 （CoreBluetooth adapter 预热），这是系统行为，不是 SDK 慢。
+
+### Windows 注意事项
+
+- **不用装驱动**：USB 走 Windows 自带的 HID 驱动（`hidapi`）。用 Zadig 等工具换成
+  WinUSB 会让 HID 集合消失，SDK 反而找不到键盘；已经换了的，到设备管理器里回滚驱动。
+- **不要在 Windows 蓝牙设置里配对键盘**：SDK 直接连键盘的厂商 GATT 服务。键盘一旦被
+  Windows 配成系统蓝牙键盘，就会一直连着系统、不再广播，SDK 扫描不到。SDK 会发出以
+  `系统蓝牙占用：` 开头的 `Error` 事件；到「设置 → 蓝牙和其他设备」删除该设备后重试。
+- **诊断**：`cargo run --release --example windows_diag`（或直接双击预编译的
+  `windows_diag.exe`，无需参数）会生成 `reai-board-diag-YYYYMMDD-HHMMSS.txt`，包含 HID 枚举、
+  USB `0x13` 设备信息探测、BLE 广播与系统已配对设备。
 
 ### 系统权限
 
@@ -170,7 +181,7 @@ SDK **不模拟、不注入键盘输入**，它只读设备上报并向设备发
 | Feature            | 引入依赖                                              | 默认？ |
 |--------------------|-------------------------------------------------------|--------|
 | `usb`              | `hidapi 2.6`（USB HID）+ `cpal 0.15`（USB Audio 采集）+ `msbc-decoder` | ✅     |
-| `ble`              | `btleplug 0.12`（BLE GATT）+ `futures-util` + `msbc-decoder` | ✅     |
+| `ble`              | `btleplug 0.12`（BLE GATT）+ `futures-util` + `msbc-decoder`（Windows 上另加 `windows 0.62`，与 btleplug 同一版本线） | ✅     |
 | `virtual-mic`      | 无新依赖（macOS 构建需 `cmake`；Windows 运行时需 WDK 驱动包） | ❌     |
 | `test-mode`        | 工厂测试命令（如 `shutdown_device(0x5E)`）            | ❌     |
 
@@ -501,6 +512,7 @@ device.set_factory_key_test(true, session).await?;  // CMD 0x6C；事件走 0x6D
 cargo run --example usb_probe        # USB HID + USB Audio
 cargo run --example ble_probe        # BLE 扫描 + 连接 + 音频 + 按键
 cargo run --example ble_scan         # BLE 诊断：列出周围全部广播（排查"连不上"）
+cargo run --release --example windows_diag   # 一次性 USB + BLE 诊断报告（主要给 Windows 用）
 cargo run --example device_demo      # 读设备信息 / 按键配置 / 写回往返
 cargo run --example listen_demo      # 两种事件门面并排演示
 cargo run --example uac_capture      # UAC 兼容通路采集：电平 + 可选 mono/stereo WAV 落盘

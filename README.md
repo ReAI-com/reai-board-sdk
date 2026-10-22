@@ -150,7 +150,7 @@ checklist. Shared Rust/Dart golden vectors prevent protocol byte drift.
 |---------|--------|----------------------------------------------------------------|
 | macOS   | Verified in CI | `hidapi` uses `macos-shared-device`                    |
 | Linux   | Builds in CI   | Needs `libdbus-1-dev libudev-dev libasound2-dev pkg-config`; `udev` rules may be needed for raw HID |
-| Windows | Expected to work, **not yet verified** | WinUSB / Zadig driver for raw HID access |
+| Windows | Builds in CI; hardware validation in progress | Uses the inbox HID class driver — **do not** install WinUSB / Zadig (it replaces the HID driver and hides the board from `hidapi`). See [Windows notes](#windows-notes) |
 | iOS     | Flutter CI verified; hardware pending | Flutter package, CoreBluetooth BLE only |
 | Android | Flutter CI verified; hardware pending | Flutter package, Android GATT only |
 
@@ -161,6 +161,23 @@ them as automated-build coverage, not physical acceptance.
 
 `ble` uses `btleplug` 0.12 (native async). First `start()` may take ~40 s on
 macOS while CoreBluetooth warms up its adapter — this is the OS, not the SDK.
+
+### Windows notes
+
+- **No driver install.** USB uses Windows' built-in HID class driver through
+  `hidapi`. Replacing it with WinUSB (e.g. via Zadig) makes the HID collections
+  disappear and the SDK can no longer see the board; roll back in Device
+  Manager if that happened.
+- **Do not pair the board in Windows Bluetooth settings.** The SDK talks to the
+  board's vendor GATT service directly. If Windows has it paired as a system
+  keyboard it stays connected to Windows and stops advertising, so the SDK scan
+  cannot find it. The SDK reports this as an `Error` event whose message starts
+  with `系统蓝牙占用：` ("held by system Bluetooth"); remove the device under
+  *Settings → Bluetooth & devices* and retry.
+- **Diagnostics.** `cargo run --release --example windows_diag` (or the
+  prebuilt `windows_diag.exe`, double-click, no arguments) writes a
+  `reai-board-diag-YYYYMMDD-HHMMSS.txt` report covering HID enumeration, the
+  USB `0x13` device-info probe and BLE / system-paired devices.
 
 ### OS permissions
 
@@ -192,7 +209,7 @@ device state. See [Security notes](#security-notes).
 | Feature            | What it pulls in                                         | Default? |
 |--------------------|----------------------------------------------------------|----------|
 | `usb`              | `hidapi 2.6` (USB HID) + `cpal 0.15` (USB Audio capture) + `msbc-decoder` | ✅       |
-| `ble`              | `btleplug 0.12` (BLE GATT) + `futures-util` + `msbc-decoder` | ✅       |
+| `ble`              | `btleplug 0.12` (BLE GATT) + `futures-util` + `msbc-decoder` (+ `windows 0.62`, Windows only, same line btleplug uses) | ✅       |
 | `virtual-mic`      | no new deps (macOS needs `cmake` at build time; Windows needs a WDK-built driver package at runtime) | ❌       |
 | `test-mode`        | Factory test commands (e.g. `shutdown_device(0x5E)`)     | ❌       |
 
@@ -553,6 +570,7 @@ Run from the crate root:
 cargo run --example usb_probe        # USB HID + USB Audio
 cargo run --example ble_probe        # BLE scan + connect + audio + keys
 cargo run --example ble_scan         # BLE diagnosis: list every advertising device
+cargo run --release --example windows_diag   # one-shot USB + BLE report file (built for Windows support)
 cargo run --example device_demo      # read device info / key config / round-trip write
 cargo run --example listen_demo      # both event facade flavors side-by-side
 cargo run --example uac_capture      # UAC compat capture: levels + optional mono/stereo WAV dumps

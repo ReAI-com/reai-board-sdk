@@ -5,3 +5,4 @@
 
 pub mod device_manager;
 pub mod monitor;
+pub mod probe;
