@@ -5,6 +5,31 @@ follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [0.3.5] — 2026-10-24
+
+### Fixed
+
+- **`reset_host_binding_state()` now actually resumes BLE.** The core and the
+  hotplug loop each held their own "bound to another host" flag, so the reset
+  cleared a flag the loop never read and a rejected computer could only recover
+  by plugging in USB or restarting. Both now share one flag
+  (`HotplugManager::with_ble_bound_by_other`).
+  ([#16](https://github.com/ReAI-com/reai-board-sdk/issues/16))
+- **No more "connect → kicked → reconnect" loop on `0x60 reason=0x03`.** When
+  the board disconnects with reason `0x03` (bound to another host), the BLE
+  session now ends exactly like a rejected identity check: it emits
+  `BoardEvent::HostBinding(BoundToOtherHost)`, reports `DeviceDisconnect` and
+  stops reconnecting. Other reasons (e.g. `0x02` idle sleep) are unchanged.
+  With a token injected, a failed or timed-out `0x6E` capability query is now
+  retried instead of being treated as old firmware; only an explicit reply
+  without bit 4 counts as unsupported. Firmware older than v1.59 never answers
+  `0x6E`, so after 3 consecutive failures the connection proceeds unverified
+  (logged), and if that connection is then kicked with `0x03` the next round
+  re-runs verification instead of giving up.
+  ([#16](https://github.com/ReAI-com/reai-board-sdk/issues/16))
+- `--no-default-features --features ble` builds, `--all-targets` examples and
+  `cargo doc -D warnings` compile again.
+
 ## [0.3.4] — 2026-10-24
 
 ### Added
@@ -363,7 +388,8 @@ follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   Audio capture and BLE Vendor GATT scan / connect / notify / mSBC
   decode.
 
-[Unreleased]: https://github.com/ReAI-com/reai-board-sdk/compare/v0.3.4...HEAD
+[Unreleased]: https://github.com/ReAI-com/reai-board-sdk/compare/v0.3.5...HEAD
+[0.3.5]: https://github.com/ReAI-com/reai-board-sdk/releases/tag/v0.3.5
 [0.3.3]: https://github.com/ReAI-com/reai-board-sdk/releases/tag/v0.3.3
 [0.3.4]: https://github.com/ReAI-com/reai-board-sdk/releases/tag/v0.3.4
 [0.3.2]: https://github.com/ReAI-com/reai-board-sdk/releases/tag/v0.3.2
