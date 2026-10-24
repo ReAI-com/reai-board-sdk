@@ -1001,8 +1001,9 @@ impl BoardDeviceCore {
                 #[cfg(feature = "ble")]
                 {
                     let response = self.cmd_via_gatt(&packet, CMD_AI_HOST_BIND_UNBIND).await?;
-                    let result = parse_host_result_gatt_response(CMD_AI_HOST_BIND_UNBIND, &response)
-                        .ok_or_else(|| anyhow::anyhow!("host_bind_unbind 响应解析失败"))?;
+                    let result =
+                        parse_host_result_gatt_response(CMD_AI_HOST_BIND_UNBIND, &response)
+                            .ok_or_else(|| anyhow::anyhow!("host_bind_unbind 响应解析失败"))?;
                     if result != 0 {
                         anyhow::bail!("host_bind_unbind 失败: result=0x{result:02X}");
                     }

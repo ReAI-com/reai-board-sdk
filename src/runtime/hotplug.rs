@@ -20,8 +20,9 @@ use anyhow::Result;
 use tokio::sync::broadcast;
 
 use crate::kernel::event::{
-    BoardEvent, ConnectionEvent, DeviceInfo, DisconnectReason, ErrorEvent, ReconnectEvent,
-    ReconnectState, HostBindingEvent, HostBindingState};
+    BoardEvent, ConnectionEvent, DeviceInfo, DisconnectReason, ErrorEvent, HostBindingEvent,
+    HostBindingState, ReconnectEvent, ReconnectState,
+};
 use crate::kernel::protocol_hid::*;
 use crate::kernel::types::ConnectionType;
 
@@ -1114,9 +1115,11 @@ impl HotplugManager {
                     log::warn!(target: "hotplug", "BLE 设备已绑定其他电脑，停止重连（插 USB 可换绑）");
                     let _ = client.disconnect().await;
                     self.ble_bound_by_other.store(true, Ordering::SeqCst);
-                    let _ = self.event_tx.send(BoardEvent::HostBinding(HostBindingEvent {
-                        state: HostBindingState::BoundToOtherHost,
-                    }));
+                    let _ = self
+                        .event_tx
+                        .send(BoardEvent::HostBinding(HostBindingEvent {
+                            state: HostBindingState::BoundToOtherHost,
+                        }));
                     self.notify_disconnected(DisconnectReason::DeviceDisconnect);
                     return;
                 }

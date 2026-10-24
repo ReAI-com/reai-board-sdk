@@ -1049,10 +1049,7 @@ pub fn parse_host_result_hid_response(expected_cmd: u8, response: &[u8]) -> Opti
 
 /// 解析单字节 result 响应（GATT 形态 `[cmd, len=1, result]`）。
 pub fn parse_host_result_gatt_response(expected_cmd: u8, response: &[u8]) -> Option<u8> {
-    if response.len() < 3
-        || response[0] != expected_cmd
-        || response[1] != 1
-    {
+    if response.len() < 3 || response[0] != expected_cmd || response[1] != 1 {
         return None;
     }
     Some(response[2])
@@ -1707,7 +1704,10 @@ mod tests {
         assert_eq!(&packet[..3], &[REPORT_ID_OUTPUT, CMD_AI_HOST_BIND_GET, 0]);
 
         let packet = HidPacket::host_bind_unbind();
-        assert_eq!(&packet[..5], &[REPORT_ID_OUTPUT, CMD_AI_HOST_BIND_UNBIND, 2, 0xA5, 0x5A]);
+        assert_eq!(
+            &packet[..5],
+            &[REPORT_ID_OUTPUT, CMD_AI_HOST_BIND_UNBIND, 2, 0xA5, 0x5A]
+        );
     }
 
     #[test]
@@ -1749,7 +1749,13 @@ mod tests {
             parse_host_result_gatt_response(CMD_AI_HOST_IDENTITY, &[0x74, 1, 1]),
             Some(1)
         );
-        assert_eq!(parse_host_result_hid_response(CMD_AI_HOST_IDENTITY, &[0x0A, 0x71, 1, 0]), None);
-        assert_eq!(parse_host_result_gatt_response(CMD_AI_HOST_IDENTITY, &[0x74, 1]), None);
+        assert_eq!(
+            parse_host_result_hid_response(CMD_AI_HOST_IDENTITY, &[0x0A, 0x71, 1, 0]),
+            None
+        );
+        assert_eq!(
+            parse_host_result_gatt_response(CMD_AI_HOST_IDENTITY, &[0x74, 1]),
+            None
+        );
     }
 }

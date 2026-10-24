@@ -26,7 +26,11 @@ use reai_board_sdk::{BoardConfig, BoardDevice, BoardEvent};
 
 fn parse_token(hex: &str) -> anyhow::Result<[u8; 16]> {
     let hex = hex.trim().replace('-', "");
-    anyhow::ensure!(hex.len() == 32, "token 须为 32 位 hex（16 字节），收到 {} 位", hex.len());
+    anyhow::ensure!(
+        hex.len() == 32,
+        "token 须为 32 位 hex（16 字节），收到 {} 位",
+        hex.len()
+    );
     let mut token = [0u8; 16];
     for (i, byte) in token.iter_mut().enumerate() {
         *byte = u8::from_str_radix(&hex[i * 2..i * 2 + 2], 16)?;
@@ -52,14 +56,19 @@ fn random_token() -> [u8; 16] {
         .unwrap_or(0);
     let mut state = seed;
     for byte in token.iter_mut() {
-        state = state.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+        state = state
+            .wrapping_mul(6364136223846793005)
+            .wrapping_add(1442695040888963407);
         *byte = (state >> 33) as u8;
     }
     token
 }
 
 async fn open_device(token: Option<[u8; 16]>) -> anyhow::Result<BoardDevice> {
-    let device = BoardDevice::open(BoardConfig { host_token: token, ..Default::default() })?;
+    let device = BoardDevice::open(BoardConfig {
+        host_token: token,
+        ..Default::default()
+    })?;
     device.start().await?;
     Ok(device)
 }
@@ -144,7 +153,10 @@ async fn main() -> anyhow::Result<()> {
             while tokio::time::Instant::now() < deadline {
                 match tokio::time::timeout_at(deadline, events.recv()).await {
                     Ok(Ok(Some(BoardEvent::Connection(c)))) => {
-                        println!("[Connection] connected={} type={:?} reason={:?}", c.connected, c.connection_type, c.reason);
+                        println!(
+                            "[Connection] connected={} type={:?} reason={:?}",
+                            c.connected, c.connection_type, c.reason
+                        );
                         if !c.connected {
                             println!("（已断开；若 reason=device_disconnect 且伴随下方 HostBinding，即绑定拒绝）");
                         }
