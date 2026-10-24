@@ -350,6 +350,7 @@ impl BoardDeviceCore {
                         }
                         // BLE 主机绑定（固件 #13）：插 USB 即绑定本机（唯一换主人入口）。
                         // token 未注入或固件不支持（能力位 bit4=0）时跳过，行为不变。
+                        #[cfg(feature = "usb")]
                         if let Err(e) = inner.host_bind_on_usb_connect().await {
                             log::warn!(target: "board", "[host-bind] USB 自动绑定失败: {}", e);
                         }
@@ -893,14 +894,11 @@ impl BoardDeviceCore {
         }
     }
 
-    /// 上报 App 在线状态（CMD 0x65）。
-    ///
-    /// App 连接成功后自动发 `online=true`；SDK shutdown 前自动发 `online=false`。
-    /// 也可由上层手动调用。无需解析响应（fire-and-forget，但会等待确认）。
     /// USB 连接后自动「绑定本机」（固件 #13）。
     ///
     /// 前置条件：`set_host_token` 已注入且固件 0x6E 能力位含 bit4。
     /// SET 成功后回读 GET 校验 token 摘要；任何失败只影响绑定，不影响连接。
+    #[cfg(feature = "usb")]
     async fn host_bind_on_usb_connect(&self) -> Result<()> {
         use crate::kernel::protocol_hid::{
             parse_host_result_hid_response, HidPacket, CMD_AI_HOST_BIND_SET,
@@ -1018,6 +1016,10 @@ impl BoardDeviceCore {
         Ok(())
     }
 
+    /// 上报 App 在线状态（CMD 0x65）。
+    ///
+    /// App 连接成功后自动发 `online=true`；SDK shutdown 前自动发 `online=false`。
+    /// 也可由上层手动调用。无需解析响应（fire-and-forget，但会等待确认）。
     pub async fn notify_app_online(&self, online: bool) -> Result<()> {
         let conn_type = self
             .connection()

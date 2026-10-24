@@ -501,7 +501,7 @@ impl HotplugManager {
         }
     }
 
-    /// 注入主机绑定 token 槽（与 BoardDeviceCore 同一个 Arc<Mutex>）。
+    /// 注入主机绑定 token 槽（与 BoardDeviceCore 同一个 `Arc<Mutex>`）。
     pub fn with_host_token_slot(mut self, slot: Arc<Mutex<Option<[u8; 16]>>>) -> Self {
         self.host_token = slot;
         self
