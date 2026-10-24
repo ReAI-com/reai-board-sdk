@@ -230,8 +230,21 @@ impl BoardDeviceCore {
     }
 
     /// 解除「已被其他电脑绑定」状态，恢复 BLE 自动重连。
+    ///
+    /// 标志与 hotplug 主循环共享同一个 Arc（见 `wire_host_binding`），
+    /// 清除后主循环下一轮即重新进入 BLE 会话。
     pub fn reset_host_binding_state(&self) {
         self.ble_bound_by_other.store(false, Ordering::SeqCst);
+    }
+
+    /// 把主机绑定相关的共享状态（token 槽 +「已被其他电脑绑定」标志）接到 hotplug。
+    ///
+    /// 两者都必须与 core 共享同一个 Arc：token 由 `set_host_token` 写入，标志由
+    /// `reset_host_binding_state` 清除，主循环读到的必须是同一份（#16）。
+    fn wire_host_binding(&self, hotplug: HotplugManager) -> HotplugManager {
+        hotplug
+            .with_host_token_slot(self.host_token.clone())
+            .with_ble_bound_by_other(self.ble_bound_by_other.clone())
     }
 
     /// 扫描列出周围所有 Vendor GATT 设备(REAI_VB_ 前缀)。
@@ -350,6 +363,7 @@ impl BoardDeviceCore {
                         }
                         // BLE 主机绑定（固件 #13）：插 USB 即绑定本机（唯一换主人入口）。
                         // token 未注入或固件不支持（能力位 bit4=0）时跳过，行为不变。
+                        #[cfg(feature = "usb")]
                         if let Err(e) = inner.host_bind_on_usb_connect().await {
                             log::warn!(target: "board", "[host-bind] USB 自动绑定失败: {}", e);
                         }
@@ -446,9 +460,7 @@ impl BoardDeviceCore {
                 .with_ble_auto_connect(self.ble_auto_connect.clone());
         }
 
-        hotplug = hotplug
-            .with_host_token_slot(self.host_token.clone())
-            .with_running_flag(stop_flag);
+        hotplug = self.wire_host_binding(hotplug).with_running_flag(stop_flag);
 
         tokio::spawn(async move {
             hotplug.run().await;
@@ -893,14 +905,11 @@ impl BoardDeviceCore {
         }
     }
 
-    /// 上报 App 在线状态（CMD 0x65）。
-    ///
-    /// App 连接成功后自动发 `online=true`；SDK shutdown 前自动发 `online=false`。
-    /// 也可由上层手动调用。无需解析响应（fire-and-forget，但会等待确认）。
     /// USB 连接后自动「绑定本机」（固件 #13）。
     ///
     /// 前置条件：`set_host_token` 已注入且固件 0x6E 能力位含 bit4。
     /// SET 成功后回读 GET 校验 token 摘要；任何失败只影响绑定，不影响连接。
+    #[cfg(feature = "usb")]
     async fn host_bind_on_usb_connect(&self) -> Result<()> {
         use crate::kernel::protocol_hid::{
             parse_host_result_hid_response, HidPacket, CMD_AI_HOST_BIND_SET,
@@ -1001,8 +1010,9 @@ impl BoardDeviceCore {
                 #[cfg(feature = "ble")]
                 {
                     let response = self.cmd_via_gatt(&packet, CMD_AI_HOST_BIND_UNBIND).await?;
-                    let result = parse_host_result_gatt_response(CMD_AI_HOST_BIND_UNBIND, &response)
-                        .ok_or_else(|| anyhow::anyhow!("host_bind_unbind 响应解析失败"))?;
+                    let result =
+                        parse_host_result_gatt_response(CMD_AI_HOST_BIND_UNBIND, &response)
+                            .ok_or_else(|| anyhow::anyhow!("host_bind_unbind 响应解析失败"))?;
                     if result != 0 {
                         anyhow::bail!("host_bind_unbind 失败: result=0x{result:02X}");
                     }
@@ -1017,6 +1027,10 @@ impl BoardDeviceCore {
         Ok(())
     }
 
+    /// 上报 App 在线状态（CMD 0x65）。
+    ///
+    /// App 连接成功后自动发 `online=true`；SDK shutdown 前自动发 `online=false`。
+    /// 也可由上层手动调用。无需解析响应（fire-and-forget，但会等待确认）。
     pub async fn notify_app_online(&self, online: bool) -> Result<()> {
         let conn_type = self
             .connection()
@@ -2497,5 +2511,41 @@ mod usb_command_connection_reuse_tests {
         assert!(!should_invalidate_usb_command_after(
             &HidPacket::get_device_info()
         ));
+    }
+}
+
+#[cfg(test)]
+mod host_binding_wiring_tests {
+    use super::*;
+
+    /// 缺陷 1（#16）：core 与 hotplug 必须共享同一个「已被其他电脑绑定」标志，
+    /// 否则 facade 的 reset_host_binding_state() 清不到主循环读的那一个。
+    #[test]
+    fn reset_from_core_unblocks_the_hotplug_main_loop() {
+        let core = BoardDeviceCore::new(HotplugConfig::default()).unwrap();
+        let hotplug = core.wire_host_binding(HotplugManager::new(
+            core.event_tx.clone(),
+            core.hotplug_config.clone(),
+        ));
+
+        // hotplug 侧判定被拒（身份声明被拒 / 0x60 reason=0x03 的共用出口）
+        hotplug.mark_bound_to_other_host();
+        assert!(hotplug.ble_blocked_by_other_host());
+        assert!(core.ble_bound_by_other.load(Ordering::SeqCst));
+
+        // 调用方经 facade → core 重置后，主循环读到的标志随之清除，下一轮重新进入 BLE 会话
+        core.reset_host_binding_state();
+        assert!(!hotplug.ble_blocked_by_other_host());
+    }
+
+    #[test]
+    fn host_token_slot_is_shared_with_hotplug() {
+        let core = BoardDeviceCore::new(HotplugConfig::default()).unwrap();
+        let hotplug = core.wire_host_binding(HotplugManager::new(
+            core.event_tx.clone(),
+            core.hotplug_config.clone(),
+        ));
+        core.set_host_token(Some([7; 16]));
+        assert_eq!(*hotplug.host_token_slot().lock().unwrap(), Some([7; 16]));
     }
 }

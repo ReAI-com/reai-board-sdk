@@ -20,8 +20,9 @@ use anyhow::Result;
 use tokio::sync::broadcast;
 
 use crate::kernel::event::{
-    BoardEvent, ConnectionEvent, DeviceInfo, DisconnectReason, ErrorEvent, ReconnectEvent,
-    ReconnectState, HostBindingEvent, HostBindingState};
+    BoardEvent, ConnectionEvent, DeviceInfo, DisconnectReason, ErrorEvent, HostBindingEvent,
+    HostBindingState, ReconnectEvent, ReconnectState,
+};
 use crate::kernel::protocol_hid::*;
 use crate::kernel::types::ConnectionType;
 
@@ -459,19 +460,132 @@ pub struct HotplugManager {
     /// 已被其他电脑绑定：true 时跳过 BLE 会话，避免「连上→被踢→再连」循环。
     /// USB 会话开始或调用方 reset_host_binding_state() 时解除。
     ble_bound_by_other: Arc<AtomicBool>,
+    /// 已注入 token 时 0x6E 能力位查询连续失败（超时/通信错误）的次数。
+    /// 收到任何能力回包或 USB 会话开始时清零；达到
+    /// [`HOST_CAPS_QUERY_FALLBACK_THRESHOLD`] 后按旧固件放行（不做身份校验）。
+    #[cfg(feature = "ble")]
+    host_caps_query_failures: u32,
 }
 
 /// 身份校验结果（固件 #13）。
 #[cfg(feature = "ble")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum HostIdentityCheck {
     /// token 匹配（或设备未绑定，校验形同通过）
     Pass,
-    /// 固件不支持绑定（能力位 bit4=0 / 无响应）——跳过，兼容旧行为
+    /// 固件明确回了能力包但 bit4=0（不支持绑定）——跳过，兼容旧行为
     Unsupported,
+    /// 能力位查询连续失败已达上限，按旧固件放行（未做身份校验）。
+    /// 若随后被固件以 0x60 reason=0x03 踢掉，说明固件其实支持绑定，下一轮重新校验。
+    Unverified,
     /// 已绑定其他电脑（token 不匹配）——停止重连
     BoundToOtherHost,
-    /// 支持绑定但响应超时——按本轮失败重试
+    /// 能力位查询失败（未达放行上限）——本轮失败，稍后重试
+    CapsQueryFailed,
+    /// 支持绑定但身份声明响应超时——按本轮失败重试
     Timeout,
+}
+
+/// 已注入 token 时，0x6E 能力位查询连续失败多少次后按旧固件放行。
+///
+/// 固件 < v1.59 不认识 0x6E、不回包，只能靠超时判断；如果每次失败都当「本轮失败」，
+/// 这类旧固件会被永远卡在重试里。连续失败 3 次（每次间隔约 5 秒）后放行，
+/// 代价是旧固件用户首次回连多等十几秒；v1.75+ 固件偶发超时则多半能在上限内恢复。
+/// 计数只在收到能力回包或 USB 会话开始时清零，放行后同一次运行内的回连不再重复等待。
+#[cfg(feature = "ble")]
+const HOST_CAPS_QUERY_FALLBACK_THRESHOLD: u32 = 3;
+
+/// 0x6E 能力位查询的结果归类。
+#[cfg(feature = "ble")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CapsQueryResult {
+    /// 收到能力回包且 bit4（host_binding_v1）置位
+    Supported,
+    /// 收到明确回包，但 bit4 未置位或结果码非 0（固件不支持绑定）
+    NotSupported,
+    /// 超时 / 通信错误 / 空响应——没拿到固件的回答
+    Failed,
+}
+
+/// 把 0x6E 查询的原始结果归类。只有真正收到固件回包才算「明确不支持」。
+#[cfg(feature = "ble")]
+fn classify_caps_query(response: &Result<Vec<u8>>) -> CapsQueryResult {
+    match response {
+        Ok(resp) if !resp.is_empty() => match parse_audio_capabilities_gatt_response(resp) {
+            Some(caps) if caps.host_binding_v1 => CapsQueryResult::Supported,
+            _ => CapsQueryResult::NotSupported,
+        },
+        // 空响应来自 pending 被同 CMD 新请求挤掉，不是固件回包
+        _ => CapsQueryResult::Failed,
+    }
+}
+
+/// 能力位查询后的下一步。
+#[cfg(feature = "ble")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CapsDecision {
+    /// 支持绑定：继续发身份声明
+    Verify,
+    /// 固件明确不支持：跳过校验
+    Skip,
+    /// 连续失败达上限：按旧固件放行（未校验）
+    SkipUnverified,
+    /// 本轮失败，稍后重试
+    Retry,
+}
+
+/// 根据查询结果与连续失败计数决定下一步（会更新计数）。
+#[cfg(feature = "ble")]
+fn decide_after_caps_query(result: CapsQueryResult, failures: &mut u32) -> CapsDecision {
+    match result {
+        CapsQueryResult::Supported => {
+            *failures = 0;
+            CapsDecision::Verify
+        }
+        CapsQueryResult::NotSupported => {
+            *failures = 0;
+            CapsDecision::Skip
+        }
+        CapsQueryResult::Failed => {
+            *failures = failures.saturating_add(1);
+            if *failures >= HOST_CAPS_QUERY_FALLBACK_THRESHOLD {
+                CapsDecision::SkipUnverified
+            } else {
+                CapsDecision::Retry
+            }
+        }
+    }
+}
+
+/// BLE 会话结束后的处理方式。
+#[cfg(feature = "ble")]
+#[derive(Debug, Clone)]
+enum BleSessionEnd {
+    /// 固件以 0x60 reason=0x03 拒绝本机：按「已绑定其他电脑」停止重连
+    BoundToOtherHost,
+    /// 按放行连接却被 0x03 踢掉：证明固件支持绑定，清零失败计数，下一轮重新校验
+    RecheckIdentity,
+    /// 普通断开（照常自动重连）
+    Disconnected(DisconnectReason),
+}
+
+/// 根据本连接收到的 0x60 原因码判定会话结束的处理方式。
+///
+/// `identity_unverified`：本连接已注入 token，但因能力位查询失败达上限而未做身份校验。
+/// 这种情况下 0x03 只说明「本机没出示身份」，不能断定本机不是绑定主机，所以重新校验
+/// 而不是直接停止重连。
+#[cfg(feature = "ble")]
+fn decide_ble_session_end(reason: Option<u8>, identity_unverified: bool) -> BleSessionEnd {
+    match reason {
+        Some(DEVICE_DISCONNECT_REASON_BOUND_TO_OTHER_HOST) if identity_unverified => {
+            BleSessionEnd::RecheckIdentity
+        }
+        Some(DEVICE_DISCONNECT_REASON_BOUND_TO_OTHER_HOST) => BleSessionEnd::BoundToOtherHost,
+        // 收到过 0x60(固件主动断开:闲置休眠/长按断开)时上报 DeviceDisconnect,
+        // 区别于信号丢失,应用层可提示「键盘已休眠,按任意键唤醒」。
+        Some(_) => BleSessionEnd::Disconnected(DisconnectReason::DeviceDisconnect),
+        None => BleSessionEnd::Disconnected(DisconnectReason::DeviceGone),
+    }
 }
 
 impl HotplugManager {
@@ -497,18 +611,53 @@ impl HotplugManager {
             system_bluetooth_reported: AtomicBool::new(false),
             host_token: Arc::new(Mutex::new(None)),
             ble_bound_by_other: Arc::new(AtomicBool::new(false)),
+            #[cfg(feature = "ble")]
+            host_caps_query_failures: 0,
         }
     }
 
-    /// 注入主机绑定 token 槽（与 BoardDeviceCore 同一个 Arc<Mutex>）。
+    /// 注入主机绑定 token 槽（与 BoardDeviceCore 同一个 `Arc<Mutex>`）。
     pub fn with_host_token_slot(mut self, slot: Arc<Mutex<Option<[u8; 16]>>>) -> Self {
         self.host_token = slot;
+        self
+    }
+
+    /// 注入「已被其他电脑绑定」标志（与 BoardDeviceCore 同一个 Arc）。
+    ///
+    /// 必须与 core 共享：调用方经 facade 调 `reset_host_binding_state()` 清的是 core
+    /// 持有的这一个，主循环读的也必须是它，否则重置对主循环无效（#16）。
+    pub fn with_ble_bound_by_other(mut self, flag: Arc<AtomicBool>) -> Self {
+        self.ble_bound_by_other = flag;
         self
     }
 
     /// 解除「已被其他电脑绑定」状态，恢复 BLE 重试（固件 #13）。
     pub fn reset_host_binding_state(&self) {
         self.ble_bound_by_other.store(false, Ordering::SeqCst);
+    }
+
+    /// 主机绑定 token 槽（测试用：核对与 core 共享的是同一个 Arc）。
+    #[cfg(test)]
+    pub(crate) fn host_token_slot(&self) -> &Arc<Mutex<Option<[u8; 16]>>> {
+        &self.host_token
+    }
+
+    /// 主循环是否因「已被其他电脑绑定」而跳过 BLE 会话。
+    pub(crate) fn ble_blocked_by_other_host(&self) -> bool {
+        self.ble_bound_by_other.load(Ordering::SeqCst)
+    }
+
+    /// 进入「已被其他电脑绑定」状态：置标志（主循环据此停止 BLE 重连）并上报
+    /// [`HostBindingState::BoundToOtherHost`]。身份声明被拒与收到 0x60 reason=0x03
+    /// 两条路径共用这一出口；断开事件由调用方按 `DeviceDisconnect` 上报。
+    #[cfg_attr(not(feature = "ble"), allow(dead_code))]
+    pub(crate) fn mark_bound_to_other_host(&self) {
+        self.ble_bound_by_other.store(true, Ordering::SeqCst);
+        let _ = self
+            .event_tx
+            .send(BoardEvent::HostBinding(HostBindingEvent {
+                state: HostBindingState::BoundToOtherHost,
+            }));
     }
 
     pub fn on_connection_change(mut self, cb: OnConnectionChange) -> Self {
@@ -606,7 +755,7 @@ impl HotplugManager {
 
             // 已被其他电脑绑定：跳过 BLE 会话（固件 #13），USB 连接会走
             // run_usb_session 开头的清除逻辑换绑后恢复。
-            if conn_type == ConnectionType::Ble && self.ble_bound_by_other.load(Ordering::SeqCst) {
+            if conn_type == ConnectionType::Ble && self.ble_blocked_by_other_host() {
                 tokio::time::sleep(Duration::from_secs(2)).await;
                 continue;
             }
@@ -875,6 +1024,11 @@ impl HotplugManager {
         if self.ble_bound_by_other.swap(false, Ordering::SeqCst) {
             log::info!(target: "hotplug", "USB 已连接，解除「已被其他电脑绑定」状态");
         }
+        // USB 连接后固件可能已升级/换绑，能力位查询失败计数重新开始。
+        #[cfg(feature = "ble")]
+        {
+            self.host_caps_query_failures = 0;
+        }
         self.emit_reconnect(ReconnectState::Connecting, None, None);
 
         let mut monitor = match self.connect_device_hid().await {
@@ -945,36 +1099,32 @@ impl HotplugManager {
     // BLE 会话
     // ================================================================
 
-    /// BLE 身份校验（固件 #13）。先查 0x6E 能力位 bit4：旧固件返回 Unsupported。
+    /// BLE 身份校验（固件 #13）。先查 0x6E 能力位 bit4：
+    /// - 明确回包且 bit4=0 → `Unsupported`（旧固件，跳过校验）；
+    /// - 超时/通信错误 → `CapsQueryFailed`（本轮失败重试），连续失败达
+    ///   [`HOST_CAPS_QUERY_FALLBACK_THRESHOLD`] 次后 → `Unverified`（按旧固件放行）。
     #[cfg(feature = "ble")]
     async fn verify_host_identity(
         client: &VendorGattClient,
         token: &[u8; 16],
         event_tx: &broadcast::Sender<BoardEvent>,
+        caps_failures: &mut u32,
     ) -> HostIdentityCheck {
         use crate::kernel::protocol_gatt::hid_to_gatt_command;
-        use crate::kernel::protocol_hid::{
-            parse_audio_capabilities_gatt_response, parse_host_result_gatt_response, HidPacket,
-            CMD_AI_GET_AUDIO_CAPABILITIES, CMD_AI_HOST_IDENTITY,
-        };
 
         let caps_packet = HidPacket::get_audio_capabilities();
-        let caps_ok = match client
+        let caps_response = client
             .send_command_and_read_response(
                 CMD_AI_GET_AUDIO_CAPABILITIES,
                 &hid_to_gatt_command(&caps_packet),
                 2000,
             )
-            .await
-        {
-            Ok(resp) => matches!(
-                parse_audio_capabilities_gatt_response(&resp),
-                Some(caps) if caps.host_binding_v1
-            ),
-            Err(_) => false,
-        };
-        if !caps_ok {
-            return HostIdentityCheck::Unsupported;
+            .await;
+        match decide_after_caps_query(classify_caps_query(&caps_response), caps_failures) {
+            CapsDecision::Verify => {}
+            CapsDecision::Skip => return HostIdentityCheck::Unsupported,
+            CapsDecision::SkipUnverified => return HostIdentityCheck::Unverified,
+            CapsDecision::Retry => return HostIdentityCheck::CapsQueryFailed,
         }
 
         let packet = HidPacket::host_identity(token);
@@ -1105,19 +1255,46 @@ impl HotplugManager {
         client.start_notification_loop();
 
         // 3.5 主机绑定身份校验（固件 #13）：token 已注入才启用。先查 0x6E 能力位
-        // bit4——旧固件（无该位 / 不回包）跳过校验，行为与旧 SDK 完全一致。
+        // bit4——固件明确回包且无该位时跳过校验；查询失败按本轮失败重试，
+        // 连续失败达上限（固件 < v1.59 不回 0x6E）才按旧固件放行。
         let host_token = *self.host_token.lock().unwrap();
+        let mut identity_unverified = false;
         if let Some(token) = host_token {
-            match Self::verify_host_identity(&client, &token, &self.event_tx).await {
+            match Self::verify_host_identity(
+                &client,
+                &token,
+                &self.event_tx,
+                &mut self.host_caps_query_failures,
+            )
+            .await
+            {
                 HostIdentityCheck::Pass | HostIdentityCheck::Unsupported => {}
+                HostIdentityCheck::Unverified => {
+                    log::warn!(
+                        target: "hotplug",
+                        "BLE 能力位查询连续 {} 次失败，按旧固件放行（未做身份校验）",
+                        HOST_CAPS_QUERY_FALLBACK_THRESHOLD
+                    );
+                    identity_unverified = true;
+                }
                 HostIdentityCheck::BoundToOtherHost => {
                     log::warn!(target: "hotplug", "BLE 设备已绑定其他电脑，停止重连（插 USB 可换绑）");
                     let _ = client.disconnect().await;
-                    self.ble_bound_by_other.store(true, Ordering::SeqCst);
-                    let _ = self.event_tx.send(BoardEvent::HostBinding(HostBindingEvent {
-                        state: HostBindingState::BoundToOtherHost,
-                    }));
+                    self.mark_bound_to_other_host();
                     self.notify_disconnected(DisconnectReason::DeviceDisconnect);
+                    return;
+                }
+                HostIdentityCheck::CapsQueryFailed => {
+                    // 没拿到能力回包，不能当旧固件放行：v1.75+ 固件的 3s 校验门会把未出示
+                    // 身份的连接踢掉，放行只会造成「连上→被踢→再连」。本轮失败，稍后重试。
+                    log::warn!(
+                        target: "hotplug",
+                        "BLE 能力位查询失败（{}/{}），稍后重试",
+                        self.host_caps_query_failures,
+                        HOST_CAPS_QUERY_FALLBACK_THRESHOLD
+                    );
+                    let _ = client.disconnect().await;
+                    tokio::time::sleep(Duration::from_secs(5)).await;
                     return;
                 }
                 HostIdentityCheck::Timeout => {
@@ -1192,16 +1369,32 @@ impl HotplugManager {
         // 7. 断开(fire-and-forget)
         let _ = client.disconnect().await;
 
-        // 8. 不改 ble_auto_connect —— GATT 断连保持 true 自动重连
-        // 收到过 0x60(固件主动断开:闲置休眠/长按断开)时上报 DeviceDisconnect,
-        // 区别于信号丢失,应用层可提示「键盘已休眠,按任意键唤醒」。
-        let reason = if client.take_device_disconnect_reason().is_some() {
-            DisconnectReason::DeviceDisconnect
-        } else {
-            DisconnectReason::DeviceGone
-        };
-        self.notify_disconnected(reason);
-        log::info!(target: "hotplug", "BLE 设备已断开");
+        // 8. 按本连接收到的 0x60 原因码收尾。普通断开不改 ble_auto_connect——
+        // GATT 断连保持 true 自动重连;reason=0x03(已绑定其他电脑)则停止重连。
+        let end =
+            decide_ble_session_end(client.take_device_disconnect_reason(), identity_unverified);
+        match end {
+            BleSessionEnd::BoundToOtherHost => {
+                log::warn!(
+                    target: "hotplug",
+                    "固件以 0x60 reason=0x03 断开（已绑定其他电脑），停止重连（插 USB 可换绑）"
+                );
+                self.mark_bound_to_other_host();
+                self.notify_disconnected(DisconnectReason::DeviceDisconnect);
+            }
+            BleSessionEnd::RecheckIdentity => {
+                log::warn!(
+                    target: "hotplug",
+                    "未校验放行的连接被 0x60 reason=0x03 断开：固件支持绑定，下一轮重新做身份校验"
+                );
+                self.host_caps_query_failures = 0;
+                self.notify_disconnected(DisconnectReason::DeviceDisconnect);
+            }
+            BleSessionEnd::Disconnected(reason) => {
+                self.notify_disconnected(reason);
+                log::info!(target: "hotplug", "BLE 设备已断开");
+            }
+        }
     }
 
     #[cfg(not(feature = "ble"))]
@@ -1466,5 +1659,144 @@ mod tests {
         assert_eq!(full_check_interval_ticks(Duration::from_millis(1)), 20);
         assert_eq!(full_check_interval_ticks(Duration::from_millis(0)), 20);
         assert_eq!(full_check_interval_ticks(Duration::from_millis(100)), 20);
+    }
+}
+
+#[cfg(all(test, feature = "ble"))]
+mod host_binding_tests {
+    use super::*;
+    use crate::kernel::audio::{AUDIO_CAP_HOST_BINDING_V1, AUDIO_PROTOCOL_VERSION};
+
+    /// 构造 0x6E 的 GATT 回包：[cmd, len=13, result, protocol, caps u32, ...]。
+    fn caps_response(result: u8, caps: u32) -> Vec<u8> {
+        let mut resp = vec![
+            CMD_AI_GET_AUDIO_CAPABILITIES,
+            13,
+            result,
+            AUDIO_PROTOCOL_VERSION,
+        ];
+        resp.extend_from_slice(&caps.to_le_bytes());
+        resp.extend_from_slice(&[0, 0, 0, 0, 0, 0, 0]);
+        resp
+    }
+
+    // ===== 缺陷 2(b)：能力位查询失败不能当「不支持」放行 =====
+
+    #[test]
+    fn caps_reply_with_host_binding_bit_requires_verification() {
+        let resp = Ok(caps_response(0, AUDIO_CAP_HOST_BINDING_V1));
+        assert_eq!(classify_caps_query(&resp), CapsQueryResult::Supported);
+    }
+
+    #[test]
+    fn explicit_caps_reply_without_bit4_is_old_firmware() {
+        let resp = Ok(caps_response(0, 0b1));
+        assert_eq!(classify_caps_query(&resp), CapsQueryResult::NotSupported);
+        // 固件回了 0x6E 但结果码非 0：同样是明确回答「不支持」
+        let resp = Ok(caps_response(1, AUDIO_CAP_HOST_BINDING_V1));
+        assert_eq!(classify_caps_query(&resp), CapsQueryResult::NotSupported);
+    }
+
+    #[test]
+    fn caps_timeout_or_empty_response_is_a_failure_not_unsupported() {
+        let timeout: Result<Vec<u8>> = Err(anyhow::anyhow!("timeout"));
+        assert_eq!(classify_caps_query(&timeout), CapsQueryResult::Failed);
+        // pending 被同 CMD 新请求挤掉时回的是空 Vec，不是固件回包
+        assert_eq!(classify_caps_query(&Ok(vec![])), CapsQueryResult::Failed);
+    }
+
+    #[test]
+    fn caps_failure_retries_until_threshold_then_falls_back() {
+        let mut failures = 0;
+        for _ in 1..HOST_CAPS_QUERY_FALLBACK_THRESHOLD {
+            assert_eq!(
+                decide_after_caps_query(CapsQueryResult::Failed, &mut failures),
+                CapsDecision::Retry
+            );
+        }
+        // 固件 < v1.59 永远不回 0x6E：达到上限后放行，不会被永久卡在重试里
+        assert_eq!(
+            decide_after_caps_query(CapsQueryResult::Failed, &mut failures),
+            CapsDecision::SkipUnverified
+        );
+        // 放行后同一次运行内的回连直接放行，不再重复等待
+        assert_eq!(
+            decide_after_caps_query(CapsQueryResult::Failed, &mut failures),
+            CapsDecision::SkipUnverified
+        );
+    }
+
+    #[test]
+    fn any_caps_reply_resets_the_failure_count() {
+        let mut failures = HOST_CAPS_QUERY_FALLBACK_THRESHOLD - 1;
+        assert_eq!(
+            decide_after_caps_query(CapsQueryResult::Supported, &mut failures),
+            CapsDecision::Verify
+        );
+        assert_eq!(failures, 0);
+
+        let mut failures = HOST_CAPS_QUERY_FALLBACK_THRESHOLD - 1;
+        assert_eq!(
+            decide_after_caps_query(CapsQueryResult::NotSupported, &mut failures),
+            CapsDecision::Skip
+        );
+        assert_eq!(failures, 0);
+    }
+
+    // ===== 缺陷 2(a)：0x60 reason=0x03 → 已绑定其他电脑，停止重连 =====
+
+    #[test]
+    fn disconnect_reason_bound_to_other_host_stops_reconnect() {
+        assert!(matches!(
+            decide_ble_session_end(Some(DEVICE_DISCONNECT_REASON_BOUND_TO_OTHER_HOST), false),
+            BleSessionEnd::BoundToOtherHost
+        ));
+    }
+
+    #[test]
+    fn other_disconnect_reasons_keep_reconnecting() {
+        // 0x02 闲置休眠等：仍上报 DeviceDisconnect 并照常自动重连
+        assert!(matches!(
+            decide_ble_session_end(Some(0x02), false),
+            BleSessionEnd::Disconnected(DisconnectReason::DeviceDisconnect)
+        ));
+        assert!(matches!(
+            decide_ble_session_end(Some(0x01), true),
+            BleSessionEnd::Disconnected(DisconnectReason::DeviceDisconnect)
+        ));
+        // 没收到 0x60：信号丢失
+        assert!(matches!(
+            decide_ble_session_end(None, false),
+            BleSessionEnd::Disconnected(DisconnectReason::DeviceGone)
+        ));
+    }
+
+    #[test]
+    fn reason_03_after_unverified_fallback_rechecks_instead_of_giving_up() {
+        // 按放行连接没出示身份，0x03 不能证明本机不是绑定主机：重新校验
+        assert!(matches!(
+            decide_ble_session_end(Some(DEVICE_DISCONNECT_REASON_BOUND_TO_OTHER_HOST), true),
+            BleSessionEnd::RecheckIdentity
+        ));
+    }
+
+    #[test]
+    fn bound_to_other_host_exit_sets_flag_and_emits_event() {
+        let (tx, mut rx) = broadcast::channel(8);
+        let manager = HotplugManager::new(tx, HotplugConfig::default());
+        assert!(!manager.ble_blocked_by_other_host());
+
+        manager.mark_bound_to_other_host();
+
+        assert!(manager.ble_blocked_by_other_host());
+        match rx.try_recv() {
+            Ok(BoardEvent::HostBinding(e)) => {
+                assert_eq!(e.state, HostBindingState::BoundToOtherHost)
+            }
+            other => panic!("应上报 HostBinding(BoundToOtherHost)，实际 {other:?}"),
+        }
+
+        manager.reset_host_binding_state();
+        assert!(!manager.ble_blocked_by_other_host());
     }
 }

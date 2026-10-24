@@ -128,6 +128,7 @@ fn print_event(evt: &BoardEvent) {
             d.firmware_version, d.mac_address, d.battery_level
         ),
         BoardEvent::Error(e) => println!("[错误] {}", e.message),
+        BoardEvent::HostBinding(h) => println!("[主机绑定] state={:?}", h.state),
     }
 }
 

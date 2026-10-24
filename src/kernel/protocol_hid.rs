@@ -90,6 +90,12 @@ pub const CMD_AI_SHUTDOWN: u8 = 0x5E;
 /// 故用此显式事件代替固件零改动方案。
 pub const CMD_DEVICE_DISCONNECT: u8 = 0x60;
 
+/// 0x60 原因码：本机未通过主机绑定身份校验（设备已绑定其他电脑，固件 v1.75+）。
+///
+/// 收到它说明固件已拒绝本机，客户端应停止自动重连（否则「连上→被踢→再连」
+/// 每轮都占住连接约 3 秒，干扰真正的绑定主机）。
+pub const DEVICE_DISCONNECT_REASON_BOUND_TO_OTHER_HOST: u8 = 0x03;
+
 /// 读取固件持久化的静默录音标志（固件 v1.41+）
 pub const CMD_GET_SILENT_RECORD: u8 = 0x61;
 
@@ -1049,10 +1055,7 @@ pub fn parse_host_result_hid_response(expected_cmd: u8, response: &[u8]) -> Opti
 
 /// 解析单字节 result 响应（GATT 形态 `[cmd, len=1, result]`）。
 pub fn parse_host_result_gatt_response(expected_cmd: u8, response: &[u8]) -> Option<u8> {
-    if response.len() < 3
-        || response[0] != expected_cmd
-        || response[1] != 1
-    {
+    if response.len() < 3 || response[0] != expected_cmd || response[1] != 1 {
         return None;
     }
     Some(response[2])
@@ -1707,7 +1710,10 @@ mod tests {
         assert_eq!(&packet[..3], &[REPORT_ID_OUTPUT, CMD_AI_HOST_BIND_GET, 0]);
 
         let packet = HidPacket::host_bind_unbind();
-        assert_eq!(&packet[..5], &[REPORT_ID_OUTPUT, CMD_AI_HOST_BIND_UNBIND, 2, 0xA5, 0x5A]);
+        assert_eq!(
+            &packet[..5],
+            &[REPORT_ID_OUTPUT, CMD_AI_HOST_BIND_UNBIND, 2, 0xA5, 0x5A]
+        );
     }
 
     #[test]
@@ -1749,7 +1755,13 @@ mod tests {
             parse_host_result_gatt_response(CMD_AI_HOST_IDENTITY, &[0x74, 1, 1]),
             Some(1)
         );
-        assert_eq!(parse_host_result_hid_response(CMD_AI_HOST_IDENTITY, &[0x0A, 0x71, 1, 0]), None);
-        assert_eq!(parse_host_result_gatt_response(CMD_AI_HOST_IDENTITY, &[0x74, 1]), None);
+        assert_eq!(
+            parse_host_result_hid_response(CMD_AI_HOST_IDENTITY, &[0x0A, 0x71, 1, 0]),
+            None
+        );
+        assert_eq!(
+            parse_host_result_gatt_response(CMD_AI_HOST_IDENTITY, &[0x74, 1]),
+            None
+        );
     }
 }

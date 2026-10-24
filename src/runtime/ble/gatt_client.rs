@@ -164,8 +164,9 @@ struct GattEventState {
     ///
     /// Arc 与 [`VendorGattClient`] 共享:通知任务收到 0x60 时写入,hotplug 在 BLE 会话
     /// 结束时读取,把「固件主动断开(闲置休眠/长按断开)」与信号丢失区分开
-    /// (上报 [`DisconnectReason::DeviceDisconnect`])。只影响上报原因,连接语义不变——
-    /// 仍走自动重连,设备休眠唤醒/重启后会重新广播。
+    /// (上报 [`DisconnectReason::DeviceDisconnect`])。一般只影响上报原因,仍走自动重连
+    /// (设备休眠唤醒/重启后会重新广播);例外是 reason=0x03(已绑定其他电脑),
+    /// hotplug 据此停止重连(#16)。
     device_disconnect_reason: Arc<AtomicU8>,
 }
 
@@ -918,7 +919,8 @@ fn handle_event(
         CMD_DEVICE_DISCONNECT => {
             // 设备主动断开(闲置休眠/长按断开):记录原因码供断开上报区分
             // 「固件主动断开」与信号丢失(DeviceDisconnect vs DeviceGone)。
-            // 连接语义不变——仍按异常断开走自动重连(设备休眠唤醒/重启后会重新广播);
+            // 是否重连由 hotplug 按原因码决定:reason=0x03(已绑定其他电脑)停止重连,
+            // 其余仍按异常断开走自动重连(设备休眠唤醒/重启后会重新广播);
             // 不在此置 ble_auto_connect=false —— 那会导致设备关机重启后无法自动重连。
             // hotplug 通过扫描失败上限兜底永久离开。
             let reason = payload.first().copied().unwrap_or(0).max(1);

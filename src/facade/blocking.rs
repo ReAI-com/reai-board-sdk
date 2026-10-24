@@ -244,9 +244,7 @@ impl BoardDeviceBlocking {
         self.device.set_host_token(token);
     }
     /// 查询键盘的绑定状态（CMD 0x72，固件 v1.75+）。
-    pub fn host_bind_get(
-        &self,
-    ) -> anyhow::Result<crate::kernel::protocol_hid::HostBindStatus> {
+    pub fn host_bind_get(&self) -> anyhow::Result<crate::kernel::protocol_hid::HostBindStatus> {
         self.handle.block_on(self.device.host_bind_get())
     }
     /// 解绑（CMD 0x73）。
