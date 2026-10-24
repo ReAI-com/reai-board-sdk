@@ -905,7 +905,7 @@ impl BoardDeviceCore {
         use crate::kernel::protocol_hid::{
             parse_host_result_hid_response, HidPacket, CMD_AI_HOST_BIND_SET,
         };
-        let Some(token) = self.host_token.lock().unwrap().clone() else {
+        let Some(token) = *self.host_token.lock().unwrap() else {
             log::debug!(target: "board", "[host-bind] 未注入 host_token，跳过绑定");
             return Ok(());
         };

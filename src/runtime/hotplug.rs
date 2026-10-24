@@ -1106,7 +1106,7 @@ impl HotplugManager {
 
         // 3.5 主机绑定身份校验（固件 #13）：token 已注入才启用。先查 0x6E 能力位
         // bit4——旧固件（无该位 / 不回包）跳过校验，行为与旧 SDK 完全一致。
-        let host_token = self.host_token.lock().unwrap().clone();
+        let host_token = *self.host_token.lock().unwrap();
         if let Some(token) = host_token {
             match Self::verify_host_identity(&client, &token, &self.event_tx).await {
                 HostIdentityCheck::Pass | HostIdentityCheck::Unsupported => {}

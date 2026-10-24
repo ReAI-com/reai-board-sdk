@@ -5,6 +5,8 @@ follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [0.3.4] — 2026-10-24
+
 ### Added
 
 - **BLE host binding (firmware #13).** Callers inject a 16-byte `host_token`
@@ -361,8 +363,9 @@ follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   Audio capture and BLE Vendor GATT scan / connect / notify / mSBC
   decode.
 
-[Unreleased]: https://github.com/ReAI-com/reai-board-sdk/compare/v0.3.3...HEAD
+[Unreleased]: https://github.com/ReAI-com/reai-board-sdk/compare/v0.3.4...HEAD
 [0.3.3]: https://github.com/ReAI-com/reai-board-sdk/releases/tag/v0.3.3
+[0.3.4]: https://github.com/ReAI-com/reai-board-sdk/releases/tag/v0.3.4
 [0.3.2]: https://github.com/ReAI-com/reai-board-sdk/releases/tag/v0.3.2
 [0.3.1]: https://github.com/ReAI-com/reai-board-sdk/releases/tag/v0.3.1
 [0.3.0]: https://github.com/ReAI-com/reai-board-sdk/releases/tag/v0.3.0
