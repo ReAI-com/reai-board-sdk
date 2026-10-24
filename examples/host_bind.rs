@@ -171,7 +171,6 @@ async fn main() -> anyhow::Result<()> {
                     },
                     Ok(Ok(Some(evt))) => println!("[{:?}]", std::mem::discriminant(&evt)),
                     Ok(Ok(None)) | Ok(Err(_)) | Err(_) => break,
-                    Err(_) => break,
                 }
             }
             device.shutdown();
