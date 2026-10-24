@@ -21,8 +21,7 @@ use tokio::sync::broadcast;
 
 use crate::kernel::event::{
     BoardEvent, ConnectionEvent, DeviceInfo, DisconnectReason, ErrorEvent, ReconnectEvent,
-    ReconnectState,
-};
+    ReconnectState, HostBindingEvent, HostBindingState};
 use crate::kernel::protocol_hid::*;
 use crate::kernel::types::ConnectionType;
 
@@ -455,6 +454,24 @@ pub struct HotplugManager {
     /// Windows「被系统蓝牙占用」提示是否已报过（条件消失后复位）。
     #[cfg_attr(not(all(feature = "usb", target_os = "windows")), allow(dead_code))]
     system_bluetooth_reported: AtomicBool,
+    /// 主机绑定 token 槽（与 BoardDeviceCore 共享；None=未启用绑定，固件 #13）。
+    host_token: Arc<Mutex<Option<[u8; 16]>>>,
+    /// 已被其他电脑绑定：true 时跳过 BLE 会话，避免「连上→被踢→再连」循环。
+    /// USB 会话开始或调用方 reset_host_binding_state() 时解除。
+    ble_bound_by_other: Arc<AtomicBool>,
+}
+
+/// 身份校验结果（固件 #13）。
+#[cfg(feature = "ble")]
+enum HostIdentityCheck {
+    /// token 匹配（或设备未绑定，校验形同通过）
+    Pass,
+    /// 固件不支持绑定（能力位 bit4=0 / 无响应）——跳过，兼容旧行为
+    Unsupported,
+    /// 已绑定其他电脑（token 不匹配）——停止重连
+    BoundToOtherHost,
+    /// 支持绑定但响应超时——按本轮失败重试
+    Timeout,
 }
 
 impl HotplugManager {
@@ -478,7 +495,20 @@ impl HotplugManager {
             #[cfg(feature = "ble")]
             on_ble_device_name_updated: None,
             system_bluetooth_reported: AtomicBool::new(false),
+            host_token: Arc::new(Mutex::new(None)),
+            ble_bound_by_other: Arc::new(AtomicBool::new(false)),
         }
+    }
+
+    /// 注入主机绑定 token 槽（与 BoardDeviceCore 同一个 Arc<Mutex>）。
+    pub fn with_host_token_slot(mut self, slot: Arc<Mutex<Option<[u8; 16]>>>) -> Self {
+        self.host_token = slot;
+        self
+    }
+
+    /// 解除「已被其他电脑绑定」状态，恢复 BLE 重试（固件 #13）。
+    pub fn reset_host_binding_state(&self) {
+        self.ble_bound_by_other.store(false, Ordering::SeqCst);
     }
 
     pub fn on_connection_change(mut self, cb: OnConnectionChange) -> Self {
@@ -573,6 +603,13 @@ impl HotplugManager {
                 Some(ct) => ct,
                 None => break,
             };
+
+            // 已被其他电脑绑定：跳过 BLE 会话（固件 #13），USB 连接会走
+            // run_usb_session 开头的清除逻辑换绑后恢复。
+            if conn_type == ConnectionType::Ble && self.ble_bound_by_other.load(Ordering::SeqCst) {
+                tokio::time::sleep(Duration::from_secs(2)).await;
+                continue;
+            }
 
             match conn_type {
                 #[cfg(feature = "usb")]
@@ -833,6 +870,11 @@ impl HotplugManager {
 
     #[cfg(feature = "usb")]
     async fn run_usb_session(&mut self) {
+        // USB 连接 = 换主人入口：清「已被其他电脑绑定」状态（固件 #13）。
+        // 绑定本身由 device 层的连接回调完成（host_bind_on_usb_connect）。
+        if self.ble_bound_by_other.swap(false, Ordering::SeqCst) {
+            log::info!(target: "hotplug", "USB 已连接，解除「已被其他电脑绑定」状态");
+        }
         self.emit_reconnect(ReconnectState::Connecting, None, None);
 
         let mut monitor = match self.connect_device_hid().await {
@@ -902,6 +944,60 @@ impl HotplugManager {
     // ================================================================
     // BLE 会话
     // ================================================================
+
+    /// BLE 身份校验（固件 #13）。先查 0x6E 能力位 bit4：旧固件返回 Unsupported。
+    #[cfg(feature = "ble")]
+    async fn verify_host_identity(
+        client: &VendorGattClient,
+        token: &[u8; 16],
+        event_tx: &broadcast::Sender<BoardEvent>,
+    ) -> HostIdentityCheck {
+        use crate::kernel::protocol_gatt::hid_to_gatt_command;
+        use crate::kernel::protocol_hid::{
+            parse_audio_capabilities_gatt_response, parse_host_result_gatt_response, HidPacket,
+            CMD_AI_GET_AUDIO_CAPABILITIES, CMD_AI_HOST_IDENTITY,
+        };
+
+        let caps_packet = HidPacket::get_audio_capabilities();
+        let caps_ok = match client
+            .send_command_and_read_response(
+                CMD_AI_GET_AUDIO_CAPABILITIES,
+                &hid_to_gatt_command(&caps_packet),
+                2000,
+            )
+            .await
+        {
+            Ok(resp) => matches!(
+                parse_audio_capabilities_gatt_response(&resp),
+                Some(caps) if caps.host_binding_v1
+            ),
+            Err(_) => false,
+        };
+        if !caps_ok {
+            return HostIdentityCheck::Unsupported;
+        }
+
+        let packet = HidPacket::host_identity(token);
+        match client
+            .send_command_and_read_response(
+                CMD_AI_HOST_IDENTITY,
+                &hid_to_gatt_command(&packet),
+                3000,
+            )
+            .await
+        {
+            Ok(resp) => match parse_host_result_gatt_response(CMD_AI_HOST_IDENTITY, &resp) {
+                Some(0) => {
+                    let _ = event_tx.send(BoardEvent::HostBinding(HostBindingEvent {
+                        state: HostBindingState::Verified,
+                    }));
+                    HostIdentityCheck::Pass
+                }
+                _ => HostIdentityCheck::BoundToOtherHost,
+            },
+            Err(_) => HostIdentityCheck::Timeout,
+        }
+    }
 
     #[cfg(feature = "ble")]
     async fn run_ble_session(&mut self) {
@@ -1003,10 +1099,40 @@ impl HotplugManager {
             return;
         }
 
-        // 3. 建立连接状态并启动通知消费。工作模式保持未知，
-        // 直到固件上报 CMD_STATUS/0xC9 或模式键事件。
-        self.notify_connected(ConnectionType::Ble);
+        // 3. 启动通知消费（身份校验的响应经 notification loop 的 pending map 回来，
+        // 必须先于校验启动）。工作模式保持未知，直到固件上报 CMD_STATUS/0xC9
+        // 或模式键事件。
         client.start_notification_loop();
+
+        // 3.5 主机绑定身份校验（固件 #13）：token 已注入才启用。先查 0x6E 能力位
+        // bit4——旧固件（无该位 / 不回包）跳过校验，行为与旧 SDK 完全一致。
+        let host_token = self.host_token.lock().unwrap().clone();
+        if let Some(token) = host_token {
+            match Self::verify_host_identity(&client, &token, &self.event_tx).await {
+                HostIdentityCheck::Pass | HostIdentityCheck::Unsupported => {}
+                HostIdentityCheck::BoundToOtherHost => {
+                    log::warn!(target: "hotplug", "BLE 设备已绑定其他电脑，停止重连（插 USB 可换绑）");
+                    let _ = client.disconnect().await;
+                    self.ble_bound_by_other.store(true, Ordering::SeqCst);
+                    let _ = self.event_tx.send(BoardEvent::HostBinding(HostBindingEvent {
+                        state: HostBindingState::BoundToOtherHost,
+                    }));
+                    self.notify_disconnected(DisconnectReason::DeviceDisconnect);
+                    return;
+                }
+                HostIdentityCheck::Timeout => {
+                    // 固件支持绑定但身份声明响应丢失：按本轮失败重试（固件自身 3s
+                    // 门也会踢掉这条未验证连接，不会悬挂）。
+                    log::warn!(target: "hotplug", "BLE 身份校验超时，稍后重试");
+                    let _ = client.disconnect().await;
+                    self.emit_error("BLE 身份校验超时".to_string(), true);
+                    tokio::time::sleep(Duration::from_secs(5)).await;
+                    return;
+                }
+            }
+        }
+
+        self.notify_connected(ConnectionType::Ble);
 
         // CMD 0x13 的 mode 是传输模式（USB=3 / BLE=2），不是工作模式。
         // 后续工作模式仅由 CMD_STATUS/0xC9 或模式键事件更新。

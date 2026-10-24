@@ -7,6 +7,21 @@ follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Added
 
+- **BLE host binding (firmware #13).** Callers inject a 16-byte `host_token`
+  (`BoardConfig::host_token` / `set_host_token`). With a token set and a
+  v1.75+ board (capability bit 4):
+  - USB connection automatically binds this computer (SET 0x71 + GET verify);
+  - BLE connections perform identity verification (0x74) before the
+    connection is announced; a mismatch stops reconnection with a
+    `BoardEvent::HostBinding(BoundToOtherHost)` event until USB rebinds or
+    `reset_host_binding_state()` is called;
+  - new public APIs `host_bind_get()` / `host_bind_unbind()`.
+  Without a token (or on older firmware) behavior is unchanged.
+  ([#16](https://github.com/ReAI-com/reai-board-sdk/issues/16),
+  example: `examples/host_bind.rs`)
+
+### Added
+
 - **BLE disconnect reason reporting.** When the board sends the CMD 0x60
   device-disconnect notify (idle sleep / long-press disconnect), the BLE
   session now reports `DisconnectReason::DeviceDisconnect` instead of

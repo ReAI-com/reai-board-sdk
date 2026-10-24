@@ -133,6 +133,24 @@ pub const CMD_AI_GET_AUDIO_CAPABILITIES: u8 = 0x6E;
 /// Volatile short-TTL audio stream lease control (firmware 1.59+).
 pub const CMD_AI_AUDIO_STREAM_CONTROL: u8 = 0x6F;
 
+/// 主机绑定：绑定本机（16B host_token，覆盖旧绑定；固件 v1.75+，能力位 bit4）。
+pub const CMD_AI_HOST_BIND_SET: u8 = 0x71;
+
+/// 主机绑定：查询绑定状态（bound 标志 + token 前 4B 摘要 + 绑定主机地址）。
+pub const CMD_AI_HOST_BIND_GET: u8 = 0x72;
+
+/// 主机绑定：解绑恢复开放（请求需带确认魔数 0xA5 0x5A）。
+pub const CMD_AI_HOST_BIND_UNBIND: u8 = 0x73;
+
+/// 主机绑定：BLE 连接后身份声明（已绑定时 3s 内须通过，否则固件断开并回 0x60 reason=0x03）。
+pub const CMD_AI_HOST_IDENTITY: u8 = 0x74;
+
+/// `host_bind_get` 响应中「已绑定」标志值。
+pub const HOST_BIND_FLAG_BOUND: u8 = 0xA5;
+
+/// `host_bind_unbind` 请求确认魔数。
+pub const HOST_BIND_UNBIND_MAGIC: [u8; 2] = [0xA5, 0x5A];
+
 /// 工厂物理按键测试控制（固件 v1.58+）。
 #[cfg(feature = "test-mode")]
 pub const CMD_AI_FACTORY_KEY_TEST_CONTROL: u8 = 0x6C;
@@ -655,6 +673,48 @@ impl HidPacket {
         packet
     }
 
+    /// 创建「绑定本机」命令（CMD 0x71，固件 v1.75+，能力位 bit4）。
+    ///
+    /// token 为 16 字节主机身份（调用方生成并长期保存，SDK 不持久化）。
+    /// 语义为覆盖写：插到新电脑重新 SET 即换绑。
+    pub fn host_bind_set(token: &[u8; 16]) -> [u8; PACKET_SIZE] {
+        let mut packet = [0u8; PACKET_SIZE];
+        packet[0] = REPORT_ID_OUTPUT;
+        packet[1] = CMD_AI_HOST_BIND_SET;
+        packet[2] = 16;
+        packet[3..19].copy_from_slice(token);
+        packet
+    }
+
+    /// 创建「查询绑定状态」命令（CMD 0x72）。
+    pub fn host_bind_get() -> [u8; PACKET_SIZE] {
+        let mut packet = [0u8; PACKET_SIZE];
+        packet[0] = REPORT_ID_OUTPUT;
+        packet[1] = CMD_AI_HOST_BIND_GET;
+        packet
+    }
+
+    /// 创建「解绑」命令（CMD 0x73，带确认魔数防误发）。
+    pub fn host_bind_unbind() -> [u8; PACKET_SIZE] {
+        let mut packet = [0u8; PACKET_SIZE];
+        packet[0] = REPORT_ID_OUTPUT;
+        packet[1] = CMD_AI_HOST_BIND_UNBIND;
+        packet[2] = 2;
+        packet[3] = HOST_BIND_UNBIND_MAGIC[0];
+        packet[4] = HOST_BIND_UNBIND_MAGIC[1];
+        packet
+    }
+
+    /// 创建「BLE 身份声明」命令（CMD 0x74，连接后 3s 内发出）。
+    pub fn host_identity(token: &[u8; 16]) -> [u8; PACKET_SIZE] {
+        let mut packet = [0u8; PACKET_SIZE];
+        packet[0] = REPORT_ID_OUTPUT;
+        packet[1] = CMD_AI_HOST_IDENTITY;
+        packet[2] = 16;
+        packet[3..19].copy_from_slice(token);
+        packet
+    }
+
     /// 创建获取离线开网页 URL 命令（CMD 0x67）。
     pub fn get_open_url() -> [u8; PACKET_SIZE] {
         let mut packet = [0u8; PACKET_SIZE];
@@ -920,6 +980,82 @@ pub fn parse_audio_capabilities_gatt_response(
         return None;
     }
     parse_audio_capabilities_payload(&response[3..15])
+}
+
+/// `host_bind_get`（0x72）响应：绑定状态 + token 摘要 + 绑定主机地址（记录用）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+pub struct HostBindStatus {
+    /// 是否已绑定（固件侧标志 0xA5）。
+    pub bound: bool,
+    /// 绑定 token 前 4 字节摘要（未绑定时全 0），供调用方与本机 token 比对。
+    pub token_prefix: [u8; 4],
+    /// 绑定主机 BLE 地址类型（记录用，校验以 token 为准）。
+    pub addr_type: u8,
+    /// 绑定主机 BLE 地址（记录用）。
+    pub addr: [u8; 6],
+}
+
+/// Parse `[report, 0x72, len=13, result, bound, token_prefix 4B, addr_type, addr 6B]`.
+///
+/// len=13 含 result 字节，故 result 后的载荷为 12 字节（bound+prefix+type+addr）。
+pub fn parse_host_bind_get_hid_response(response: &[u8]) -> Option<HostBindStatus> {
+    if response.len() < 16
+        || response[0] != REPORT_ID_INPUT
+        || response[1] != CMD_AI_HOST_BIND_GET
+        || response[2] != 13
+        || response[3] != 0
+    {
+        return None;
+    }
+    parse_host_bind_status_payload(&response[4..16])
+}
+
+/// Parse the GATT response equivalent without the HID report id.
+pub fn parse_host_bind_get_gatt_response(response: &[u8]) -> Option<HostBindStatus> {
+    if response.len() < 15
+        || response[0] != CMD_AI_HOST_BIND_GET
+        || response[1] != 13
+        || response[2] != 0
+    {
+        return None;
+    }
+    parse_host_bind_status_payload(&response[3..15])
+}
+
+fn parse_host_bind_status_payload(payload: &[u8]) -> Option<HostBindStatus> {
+    if payload.len() < 12 {
+        return None;
+    }
+    Some(HostBindStatus {
+        bound: payload[0] == HOST_BIND_FLAG_BOUND,
+        token_prefix: payload[1..5].try_into().ok()?,
+        addr_type: payload[5],
+        addr: payload[6..12].try_into().ok()?,
+    })
+}
+
+/// 解析 0x71/0x73/0x74 的单字节 result 响应（HID 形态
+/// `[report, cmd, len=1, result]`）。返回 result 字节。
+pub fn parse_host_result_hid_response(expected_cmd: u8, response: &[u8]) -> Option<u8> {
+    if response.len() < 4
+        || response[0] != REPORT_ID_INPUT
+        || response[1] != expected_cmd
+        || response[2] != 1
+    {
+        return None;
+    }
+    Some(response[3])
+}
+
+/// 解析单字节 result 响应（GATT 形态 `[cmd, len=1, result]`）。
+pub fn parse_host_result_gatt_response(expected_cmd: u8, response: &[u8]) -> Option<u8> {
+    if response.len() < 3
+        || response[0] != expected_cmd
+        || response[1] != 1
+    {
+        return None;
+    }
+    Some(response[2])
 }
 
 fn parse_audio_capabilities_payload(
@@ -1548,5 +1684,72 @@ mod tests {
             parse_sleep_timeout_hid_response(&[0x0A, 0x63, 5, 0], 0x63),
             None
         );
+    }
+    #[test]
+    fn host_bind_set_and_identity_packets() {
+        let token = [0x11u8; 16];
+        let packet = HidPacket::host_bind_set(&token);
+        assert_eq!(packet[0], REPORT_ID_OUTPUT);
+        assert_eq!(packet[1], CMD_AI_HOST_BIND_SET);
+        assert_eq!(packet[2], 16);
+        assert_eq!(&packet[3..19], &token);
+        assert_eq!(&packet[19..], &[0u8; PACKET_SIZE - 19][..]);
+
+        let packet = HidPacket::host_identity(&token);
+        assert_eq!(packet[1], CMD_AI_HOST_IDENTITY);
+        assert_eq!(packet[2], 16);
+        assert_eq!(&packet[3..19], &token);
+    }
+
+    #[test]
+    fn host_bind_get_and_unbind_packets() {
+        let packet = HidPacket::host_bind_get();
+        assert_eq!(&packet[..3], &[REPORT_ID_OUTPUT, CMD_AI_HOST_BIND_GET, 0]);
+
+        let packet = HidPacket::host_bind_unbind();
+        assert_eq!(&packet[..5], &[REPORT_ID_OUTPUT, CMD_AI_HOST_BIND_UNBIND, 2, 0xA5, 0x5A]);
+    }
+
+    #[test]
+    fn host_bind_get_response_parsing() {
+        // bound: [report, 0x72, len=13, result=0, 0xA5, prefix 4B, type, addr 6B]
+        let mut response = [0u8; 16];
+        response[0] = REPORT_ID_INPUT;
+        response[1] = CMD_AI_HOST_BIND_GET;
+        response[2] = 13;
+        response[3] = 0;
+        response[4] = HOST_BIND_FLAG_BOUND;
+        response[5..9].copy_from_slice(&[0xDE, 0xAD, 0xBE, 0xEF]);
+        response[9] = 1;
+        response[10..16].copy_from_slice(&[1, 2, 3, 4, 5, 6]);
+        let status = parse_host_bind_get_hid_response(&response).expect("hid parse");
+        assert!(status.bound);
+        assert_eq!(status.token_prefix, [0xDE, 0xAD, 0xBE, 0xEF]);
+        assert_eq!(status.addr, [1, 2, 3, 4, 5, 6]);
+
+        // GATT 形态（无 report id）
+        let gatt = response[1..].to_vec();
+        let status = parse_host_bind_get_gatt_response(&gatt).expect("gatt parse");
+        assert!(status.bound);
+
+        // unbound：bound 字节非 0xA5
+        let mut unbound = response;
+        unbound[4] = 0;
+        let status = parse_host_bind_get_hid_response(&unbound).expect("unbound parse");
+        assert!(!status.bound);
+    }
+
+    #[test]
+    fn host_result_response_parsing() {
+        assert_eq!(
+            parse_host_result_hid_response(CMD_AI_HOST_IDENTITY, &[REPORT_ID_INPUT, 0x74, 1, 0]),
+            Some(0)
+        );
+        assert_eq!(
+            parse_host_result_gatt_response(CMD_AI_HOST_IDENTITY, &[0x74, 1, 1]),
+            Some(1)
+        );
+        assert_eq!(parse_host_result_hid_response(CMD_AI_HOST_IDENTITY, &[0x0A, 0x71, 1, 0]), None);
+        assert_eq!(parse_host_result_gatt_response(CMD_AI_HOST_IDENTITY, &[0x74, 1]), None);
     }
 }

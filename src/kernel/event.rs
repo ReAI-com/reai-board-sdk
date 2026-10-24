@@ -28,6 +28,8 @@ pub enum BoardEvent {
     FactoryKey(FactoryKeyEvent),
     /// 设备信息(主动读取或轮询得到)
     DeviceInfo(DeviceInfo),
+    /// 主机绑定状态变化（BLE 身份校验结果 / 已绑定其他电脑）
+    HostBinding(HostBindingEvent),
     /// 错误(非致命,如某次命令超时)
     Error(ErrorEvent),
 }
@@ -63,6 +65,22 @@ pub enum DisconnectReason {
     UserAction,
     /// 固件主动断开(BLE 收到过 CMD=0x60 通知:闲置休眠/长按断开)
     DeviceDisconnect,
+}
+
+/// BLE 主机绑定状态（固件 #13，能力位 bit4）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum HostBindingState {
+    /// 身份校验通过：本机是绑定主机，BLE 功能正常。
+    Verified,
+    /// 已绑定其他电脑：SDK 停止 BLE 重试（插 USB 换绑或调用方显式恢复）。
+    BoundToOtherHost,
+}
+
+/// 主机绑定事件。
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+pub struct HostBindingEvent {
+    pub state: HostBindingState,
 }
 
 /// 重连状态事件

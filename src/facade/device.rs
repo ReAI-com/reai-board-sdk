@@ -34,6 +34,12 @@ pub struct BoardConfig {
         any(target_os = "macos", target_os = "windows")
     ))]
     pub virtual_mic: crate::virtual_mic::VirtualMicConfig,
+    /// 主机绑定 token（16 字节，固件 #13，v1.75+ 能力位 bit4）。
+    ///
+    /// 由调用方生成并长期保存（SDK 不持久化）。注入后：USB 连接自动「绑定本机」
+    /// （覆盖旧绑定），BLE 连接先做身份校验，被拒则停止重连并上报
+    /// [`BoardEvent::HostBinding`]。不注入则全部跳过，行为与旧固件一致。
+    pub host_token: Option<[u8; 16]>,
 }
 
 /// Board 设备高级门面(USB + BLE 统一入口)。
@@ -82,6 +88,7 @@ impl BoardDevice {
             any(target_os = "macos", target_os = "windows")
         ))]
         core.set_virtual_mic_config(config.virtual_mic);
+        core.set_host_token(config.host_token);
         let event_tx = core.event_sender().clone();
         Ok(Self {
             core,
@@ -508,6 +515,29 @@ impl BoardDevice {
     #[cfg(feature = "ble")]
     pub fn set_auto_reconnect(&self, on: bool) {
         self.core.set_auto_reconnect(on);
+    }
+
+    /// 设置主机绑定 token（None=禁用绑定逻辑，固件 #13）。
+    /// 见 [`BoardConfig::host_token`]。
+    pub fn set_host_token(&self, token: Option<[u8; 16]>) {
+        self.core.set_host_token(token);
+    }
+
+    /// 查询键盘的绑定状态（CMD 0x72，固件 v1.75+）。
+    pub async fn host_bind_get(
+        &self,
+    ) -> anyhow::Result<crate::kernel::protocol_hid::HostBindStatus> {
+        self.core.host_bind_get().await
+    }
+
+    /// 解绑（CMD 0x73，恢复开放广播/直连；调试与售后兜底用）。
+    pub async fn host_bind_unbind(&self) -> anyhow::Result<()> {
+        self.core.host_bind_unbind().await
+    }
+
+    /// 解除「已被其他电脑绑定」状态，恢复 BLE 自动重连。
+    pub fn reset_host_binding_state(&self) {
+        self.core.reset_host_binding_state();
     }
 
     fn start_mode_tracker(&self) {

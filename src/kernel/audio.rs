@@ -9,6 +9,7 @@ pub const AUDIO_CAP_USB_VENDOR_HID_MSBC_V1: u32 = 1 << 0;
 pub const AUDIO_CAP_BLE_GATT_MSBC_V1: u32 = 1 << 1;
 pub const AUDIO_CAP_STREAM_CONTROL_V1: u32 = 1 << 2;
 pub const AUDIO_CAP_PACKET_SEQUENCE_V1: u32 = 1 << 3;
+pub const AUDIO_CAP_HOST_BINDING_V1: u32 = 1 << 4;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -35,6 +36,8 @@ pub struct AudioCapabilities {
     pub ble_gatt_msbc_v1: bool,
     pub stream_control_v1: bool,
     pub packet_sequence_v1: bool,
+    /// 主机绑定（CMD 0x71-0x74 + 连接后身份校验，固件 #13）。
+    pub host_binding_v1: bool,
     pub envelope_version: u8,
     pub usb_max_payload: u8,
     pub ble_max_payload: u8,
@@ -58,6 +61,7 @@ impl AudioCapabilities {
             ble_gatt_msbc_v1: bits & AUDIO_CAP_BLE_GATT_MSBC_V1 != 0,
             stream_control_v1: bits & AUDIO_CAP_STREAM_CONTROL_V1 != 0,
             packet_sequence_v1: bits & AUDIO_CAP_PACKET_SEQUENCE_V1 != 0,
+            host_binding_v1: bits & AUDIO_CAP_HOST_BINDING_V1 != 0,
             envelope_version,
             usb_max_payload,
             ble_max_payload,

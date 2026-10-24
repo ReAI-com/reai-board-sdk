@@ -100,6 +100,10 @@ pub struct BoardDeviceCore {
     /// UAC 立体声原始 WAV 落盘路径(研究数据,opt-in;须在 start_usb_uac_compat 前调)
     #[cfg(feature = "usb")]
     uac_stereo_wav_path: Mutex<Option<String>>,
+    /// 主机绑定 token 槽（与 HotplugManager 共享；None=未启用绑定，固件 #13）。
+    host_token: Arc<Mutex<Option<[u8; 16]>>>,
+    /// 「已被其他电脑绑定」状态（与 HotplugManager 共享）。
+    ble_bound_by_other: Arc<AtomicBool>,
     #[cfg(feature = "usb")]
     usb_hid_audio: Mutex<Option<UsbVendorAudioReader>>,
     audio_capability_state: Mutex<AudioCapabilityState>,
@@ -151,6 +155,8 @@ impl BoardDeviceCore {
             usb_capture: Mutex::new(None),
             #[cfg(feature = "usb")]
             uac_stereo_wav_path: Mutex::new(None),
+            host_token: Arc::new(Mutex::new(None)),
+            ble_bound_by_other: Arc::new(AtomicBool::new(false)),
             #[cfg(feature = "usb")]
             usb_hid_audio: Mutex::new(None),
             audio_capability_state: Mutex::new(AudioCapabilityState::default()),
@@ -212,6 +218,20 @@ impl BoardDeviceCore {
     #[cfg(feature = "ble")]
     pub fn set_auto_reconnect(&self, on: bool) {
         self.ble_auto_connect.store(on, Ordering::SeqCst);
+    }
+
+    /// 设置主机绑定 token（16 字节；调用方生成并长期保存，SDK 不持久化，固件 #13）。
+    ///
+    /// 注入后：USB 连接时自动「绑定本机」（能力位支持时，覆盖旧绑定）；
+    /// BLE 连接时先做身份校验，被拒则停止重连并上报 [`BoardEvent::HostBinding`]。
+    /// 不注入（None）则全部跳过，行为与旧固件完全一致。
+    pub fn set_host_token(&self, token: Option<[u8; 16]>) {
+        *self.host_token.lock().unwrap() = token;
+    }
+
+    /// 解除「已被其他电脑绑定」状态，恢复 BLE 自动重连。
+    pub fn reset_host_binding_state(&self) {
+        self.ble_bound_by_other.store(false, Ordering::SeqCst);
     }
 
     /// 扫描列出周围所有 Vendor GATT 设备(REAI_VB_ 前缀)。
@@ -328,6 +348,11 @@ impl BoardDeviceCore {
                         if let Err(e) = inner.notify_app_online(true).await {
                             log::warn!(target: "board", "[app-online] USB 自动上报上线失败: {}", e);
                         }
+                        // BLE 主机绑定（固件 #13）：插 USB 即绑定本机（唯一换主人入口）。
+                        // token 未注入或固件不支持（能力位 bit4=0）时跳过，行为不变。
+                        if let Err(e) = inner.host_bind_on_usb_connect().await {
+                            log::warn!(target: "board", "[host-bind] USB 自动绑定失败: {}", e);
+                        }
                     });
                 }
                 Some(ConnectionType::Ble) => {
@@ -421,7 +446,9 @@ impl BoardDeviceCore {
                 .with_ble_auto_connect(self.ble_auto_connect.clone());
         }
 
-        hotplug = hotplug.with_running_flag(stop_flag);
+        hotplug = hotplug
+            .with_host_token_slot(self.host_token.clone())
+            .with_running_flag(stop_flag);
 
         tokio::spawn(async move {
             hotplug.run().await;
@@ -870,6 +897,126 @@ impl BoardDeviceCore {
     ///
     /// App 连接成功后自动发 `online=true`；SDK shutdown 前自动发 `online=false`。
     /// 也可由上层手动调用。无需解析响应（fire-and-forget，但会等待确认）。
+    /// USB 连接后自动「绑定本机」（固件 #13）。
+    ///
+    /// 前置条件：`set_host_token` 已注入且固件 0x6E 能力位含 bit4。
+    /// SET 成功后回读 GET 校验 token 摘要；任何失败只影响绑定，不影响连接。
+    async fn host_bind_on_usb_connect(&self) -> Result<()> {
+        use crate::kernel::protocol_hid::{
+            parse_host_result_hid_response, HidPacket, CMD_AI_HOST_BIND_SET,
+        };
+        let Some(token) = self.host_token.lock().unwrap().clone() else {
+            log::debug!(target: "board", "[host-bind] 未注入 host_token，跳过绑定");
+            return Ok(());
+        };
+        let caps = self.query_audio_capabilities().await?;
+        if !caps.host_binding_v1 {
+            log::debug!(target: "board", "[host-bind] 固件不支持主机绑定（bit4=0），跳过");
+            return Ok(());
+        }
+        let packet = HidPacket::host_bind_set(&token);
+        let (_len, response) = self.cmd_via_usb(packet).await?;
+        let result = parse_host_result_hid_response(CMD_AI_HOST_BIND_SET, &response)
+            .ok_or_else(|| anyhow::anyhow!("host_bind_set 响应解析失败"))?;
+        if result != 0 {
+            anyhow::bail!("host_bind_set 失败: result=0x{result:02X}");
+        }
+        let status = self.host_bind_get().await?;
+        if !status.bound || status.token_prefix != token[..4] {
+            anyhow::bail!(
+                "host_bind_set 回读校验不符: bound={} prefix={:02x?}（期望 {:02x?}）",
+                status.bound,
+                status.token_prefix,
+                &token[..4]
+            );
+        }
+        log::info!(target: "board", "[host-bind] 本机已绑定为该键盘的独占主机");
+        Ok(())
+    }
+
+    /// 查询键盘的绑定状态（CMD 0x72，固件 v1.75+，能力位 bit4）。
+    pub async fn host_bind_get(&self) -> Result<crate::kernel::protocol_hid::HostBindStatus> {
+        use crate::kernel::protocol_hid::{
+            parse_host_bind_get_gatt_response, parse_host_bind_get_hid_response,
+            CMD_AI_HOST_BIND_GET,
+        };
+        let conn_type = self
+            .connection()
+            .ok_or_else(|| anyhow::anyhow!("设备未连接"))?;
+        let packet = HidPacket::host_bind_get();
+        match conn_type {
+            #[cfg(feature = "usb")]
+            ConnectionType::Usb => {
+                let (_len, response) = self.cmd_via_usb(packet).await?;
+                parse_host_bind_get_hid_response(&response)
+                    .ok_or_else(|| anyhow::anyhow!("host_bind_get 响应解析失败"))
+            }
+            #[cfg(not(feature = "usb"))]
+            ConnectionType::Usb => {
+                let _ = conn_type;
+                anyhow::bail!("usb feature 未启用");
+            }
+            ConnectionType::Ble => {
+                #[cfg(feature = "ble")]
+                {
+                    let response = self.cmd_via_gatt(&packet, CMD_AI_HOST_BIND_GET).await?;
+                    parse_host_bind_get_gatt_response(&response)
+                        .ok_or_else(|| anyhow::anyhow!("host_bind_get 响应解析失败"))
+                }
+                #[cfg(not(feature = "ble"))]
+                {
+                    let _ = conn_type;
+                    anyhow::bail!("BLE feature 未启用");
+                }
+            }
+        }
+    }
+
+    /// 解绑（CMD 0x73，恢复开放广播/直连；调试与售后兜底用）。
+    pub async fn host_bind_unbind(&self) -> Result<()> {
+        use crate::kernel::protocol_hid::{
+            parse_host_result_gatt_response, parse_host_result_hid_response, HidPacket,
+            CMD_AI_HOST_BIND_UNBIND,
+        };
+        let conn_type = self
+            .connection()
+            .ok_or_else(|| anyhow::anyhow!("设备未连接"))?;
+        let packet = HidPacket::host_bind_unbind();
+        match conn_type {
+            #[cfg(feature = "usb")]
+            ConnectionType::Usb => {
+                let (_len, response) = self.cmd_via_usb(packet).await?;
+                let result = parse_host_result_hid_response(CMD_AI_HOST_BIND_UNBIND, &response)
+                    .ok_or_else(|| anyhow::anyhow!("host_bind_unbind 响应解析失败"))?;
+                if result != 0 {
+                    anyhow::bail!("host_bind_unbind 失败: result=0x{result:02X}");
+                }
+            }
+            #[cfg(not(feature = "usb"))]
+            ConnectionType::Usb => {
+                let _ = conn_type;
+                anyhow::bail!("usb feature 未启用");
+            }
+            ConnectionType::Ble => {
+                #[cfg(feature = "ble")]
+                {
+                    let response = self.cmd_via_gatt(&packet, CMD_AI_HOST_BIND_UNBIND).await?;
+                    let result = parse_host_result_gatt_response(CMD_AI_HOST_BIND_UNBIND, &response)
+                        .ok_or_else(|| anyhow::anyhow!("host_bind_unbind 响应解析失败"))?;
+                    if result != 0 {
+                        anyhow::bail!("host_bind_unbind 失败: result=0x{result:02X}");
+                    }
+                }
+                #[cfg(not(feature = "ble"))]
+                {
+                    let _ = conn_type;
+                    anyhow::bail!("BLE feature 未启用");
+                }
+            }
+        }
+        Ok(())
+    }
+
     pub async fn notify_app_online(&self, online: bool) -> Result<()> {
         let conn_type = self
             .connection()

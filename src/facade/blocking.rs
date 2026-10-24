@@ -239,6 +239,24 @@ impl BoardDeviceBlocking {
     pub fn set_auto_reconnect(&self, on: bool) {
         self.device.set_auto_reconnect(on);
     }
+    /// 设置主机绑定 token（None=禁用绑定逻辑，固件 #13）。
+    pub fn set_host_token(&self, token: Option<[u8; 16]>) {
+        self.device.set_host_token(token);
+    }
+    /// 查询键盘的绑定状态（CMD 0x72，固件 v1.75+）。
+    pub fn host_bind_get(
+        &self,
+    ) -> anyhow::Result<crate::kernel::protocol_hid::HostBindStatus> {
+        self.handle.block_on(self.device.host_bind_get())
+    }
+    /// 解绑（CMD 0x73）。
+    pub fn host_bind_unbind(&self) -> anyhow::Result<()> {
+        self.handle.block_on(self.device.host_bind_unbind())
+    }
+    /// 解除「已被其他电脑绑定」状态，恢复 BLE 自动重连。
+    pub fn reset_host_binding_state(&self) {
+        self.device.reset_host_binding_state();
+    }
 
     /// 事件流(同步消费用 events().blocking_recv())
     pub fn events(&self) -> super::events::EventStream {
