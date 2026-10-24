@@ -90,6 +90,12 @@ pub const CMD_AI_SHUTDOWN: u8 = 0x5E;
 /// 故用此显式事件代替固件零改动方案。
 pub const CMD_DEVICE_DISCONNECT: u8 = 0x60;
 
+/// 0x60 原因码：本机未通过主机绑定身份校验（设备已绑定其他电脑，固件 v1.75+）。
+///
+/// 收到它说明固件已拒绝本机，客户端应停止自动重连（否则「连上→被踢→再连」
+/// 每轮都占住连接约 3 秒，干扰真正的绑定主机）。
+pub const DEVICE_DISCONNECT_REASON_BOUND_TO_OTHER_HOST: u8 = 0x03;
+
 /// 读取固件持久化的静默录音标志（固件 v1.41+）
 pub const CMD_GET_SILENT_RECORD: u8 = 0x61;
 
