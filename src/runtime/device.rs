@@ -373,9 +373,8 @@ impl BoardDeviceCore {
                     if previous == Some(ConnectionType::Ble) {
                         return;
                     }
-                    // BLE：notify_connected 在 start_notification_loop() 之前触发，
-                    // 此时 GATT notification loop 尚未启动，cmd_via_gatt 会超时。
-                    // 短延迟等 loop 起来再做一次连接初始化查询。拨杆后续变化由
+                    // BLE：通知监听与身份准入已完成，但固件认证成功后的就绪
+                    // 事件仍由其主循环异步处理。保留短延迟再做初始化查询。拨杆后续变化由
                     // Consumer 键事件主动推送，不能轮询占用 GATT 命令通道。
                     // 设备信息里包含 BLE 场景刚需的电量；各项均 best-effort。
                     let inner = inner.clone();
