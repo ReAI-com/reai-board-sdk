@@ -95,7 +95,7 @@ tempfile = "3"
 env_logger = "0.11"
 # Examples wait on Ctrl-C; `signal` is example-only so library consumers do not
 # pay for the signal driver.
-tokio = { version = "1", default-features = false, features = ["signal"] }
+tokio = { version = "1", default-features = false, features = ["signal", "test-util"] }
 # windows_diag example: local timestamp for the report file name.
 chrono = { version = "0.4", default-features = false, features = ["clock"] }
 

@@ -15,9 +15,9 @@ use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
 use anyhow::Result;
-use btleplug::api::{Central as _, Peripheral as _, ScanFilter, WriteType};
+use btleplug::api::{Central as _, Peripheral as _, ScanFilter, ValueNotification, WriteType};
 use btleplug::platform::{Adapter, Peripheral};
-use futures_util::StreamExt;
+use futures_util::{Stream, StreamExt};
 use tokio::sync::broadcast;
 
 use crate::kernel::consumer_hold::{ConsumerHeldTracker, ConsumerModeTracker};
@@ -116,6 +116,51 @@ impl BleConnectPacing {
     }
 }
 
+async fn connect_with_pacing<C, CF, D, DF>(
+    pacing: BleConnectPacing,
+    still_wanted: &(dyn Fn() -> bool + Send + Sync),
+    mut connect: C,
+    mut disconnect: D,
+) -> Result<()>
+where
+    C: FnMut() -> CF,
+    CF: std::future::Future<Output = Result<()>>,
+    D: FnMut() -> DF,
+    DF: std::future::Future<Output = ()>,
+{
+    if !pacing.pre_connect_delay.is_zero() {
+        tokio::time::sleep(pacing.pre_connect_delay).await;
+    }
+    let mut attempt = 1;
+    loop {
+        if !still_wanted() {
+            return Err(anyhow::anyhow!("BLE 目标已取消或改变，放弃连接"));
+        }
+        match connect().await {
+            Ok(()) => return Ok(()),
+            Err(error) => {
+                // 包括最后一次失败：已连接但发现/订阅失败的设备可能不再广播，
+                // 不清理便交回扫描会让后续自动重连一直找不到它。
+                let _ = tokio::time::timeout(std::time::Duration::from_secs(3), disconnect()).await;
+                if attempt >= pacing.attempts {
+                    return Err(error);
+                }
+                let backoff = pacing.backoff_after(attempt);
+                log::warn!(
+                    target: "gatt",
+                    "BLE 连接第 {}/{} 次失败: {}，{}ms 后重试",
+                    attempt,
+                    pacing.attempts,
+                    error,
+                    backoff.as_millis()
+                );
+                tokio::time::sleep(backoff).await;
+                attempt += 1;
+            }
+        }
+    }
+}
+
 /// BLE 扫描发现的设备信息(手动扫描/选择连接用)
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct BleDeviceInfo {
@@ -141,7 +186,76 @@ struct GattChars {
 struct PendingResponse {
     #[allow(dead_code)]
     cmd: u8,
+    epoch: u64,
     tx: tokio::sync::oneshot::Sender<Vec<u8>>,
+}
+
+struct NotificationSession {
+    epoch: u64,
+    current_epoch: Arc<AtomicU64>,
+    running: Arc<AtomicBool>,
+    pending: Arc<Mutex<HashMap<u8, PendingResponse>>>,
+    closed: Arc<tokio::sync::Notify>,
+}
+
+enum NotificationPoll {
+    Message(Option<ValueNotification>),
+    Heartbeat,
+    Stopped,
+}
+
+impl NotificationSession {
+    fn current(&self) -> bool {
+        self.current_epoch.load(Ordering::SeqCst) == self.epoch
+            && self.running.load(Ordering::SeqCst)
+    }
+
+    async fn next(
+        &self,
+        stream: &mut (impl Stream<Item = ValueNotification> + Unpin),
+        heartbeat_deadline: tokio::time::Instant,
+    ) -> NotificationPoll {
+        let closed = self.closed.notified();
+        tokio::pin!(closed);
+        closed.as_mut().enable();
+        if !self.current() {
+            return NotificationPoll::Stopped;
+        }
+        tokio::select! {
+            _ = &mut closed => NotificationPoll::Stopped,
+            notification = stream.next() => NotificationPoll::Message(notification),
+            _ = tokio::time::sleep_until(heartbeat_deadline) => NotificationPoll::Heartbeat,
+        }
+    }
+
+    fn dispatch_event(
+        &self,
+        data: &[u8],
+        state: &mut GattEventState,
+        event_tx: &broadcast::Sender<BoardEvent>,
+    ) -> bool {
+        if !self.current() {
+            return false;
+        }
+        handle_event(data, state, event_tx, &self.pending);
+        if state.device_disconnect_reason.load(Ordering::SeqCst) != 0 {
+            self.finish(state, event_tx);
+            return false;
+        }
+        true
+    }
+
+    fn finish(&self, state: &mut GattEventState, event_tx: &broadcast::Sender<BoardEvent>) {
+        if self.current_epoch.load(Ordering::SeqCst) == self.epoch {
+            state.release_all(event_tx);
+            self.running.store(false, Ordering::SeqCst);
+            self.pending
+                .lock()
+                .unwrap()
+                .retain(|_, p| p.epoch != self.epoch);
+            self.closed.notify_waiters();
+        }
+    }
 }
 
 /// handle_event 的有状态上下文(替代全局 static,支持单设备实例化)
@@ -164,9 +278,8 @@ struct GattEventState {
     ///
     /// Arc 与 [`VendorGattClient`] 共享:通知任务收到 0x60 时写入,hotplug 在 BLE 会话
     /// 结束时读取,把「固件主动断开(闲置休眠/长按断开)」与信号丢失区分开
-    /// (上报 [`DisconnectReason::DeviceDisconnect`])。一般只影响上报原因,仍走自动重连
-    /// (设备休眠唤醒/重启后会重新广播);例外是 reason=0x03(已绑定其他电脑),
-    /// hotplug 据此停止重连(#16)。
+    /// (上报 [`DisconnectReason::DeviceDisconnect`])。reason=0x03 也可能是认证超时，
+    /// 只有身份握手中的明确拒绝才能判定绑定其他电脑并停止重连。
     device_disconnect_reason: Arc<AtomicU8>,
 }
 
@@ -202,7 +315,8 @@ pub struct VendorGattClient {
     write_lock: tokio::sync::Mutex<()>,
     seq: AtomicU64,
     /// Monotonic local epoch for every notification-loop lifetime/reconnect.
-    audio_connection_epoch: AtomicU64,
+    connection_epoch: Arc<AtomicU64>,
+    connection_closed: Arc<tokio::sync::Notify>,
     /// FE63 may be subscribed for connection health, but frames reach the Host only after an
     /// explicit board-audio route/lease activates this gate.
     audio_enabled: Arc<AtomicBool>,
@@ -233,7 +347,8 @@ impl VendorGattClient {
             pending_responses: Arc::new(Mutex::new(HashMap::new())),
             write_lock: tokio::sync::Mutex::new(()),
             seq: AtomicU64::new(0),
-            audio_connection_epoch: AtomicU64::new(0),
+            connection_epoch: Arc::new(AtomicU64::new(0)),
+            connection_closed: Arc::new(tokio::sync::Notify::new()),
             audio_enabled: Arc::new(AtomicBool::new(false)),
             audio_route_epoch: Arc::new(AtomicU64::new(0)),
             notify_handle: Mutex::new(None),
@@ -352,7 +467,7 @@ impl VendorGattClient {
         Ok(seen.into_values().collect())
     }
 
-    /// 连接设备、发现服务、订阅 Event/Audio 通知。
+    /// 连接设备、发现服务、订阅 Event 通知。Audio 留到身份准入之后。
     ///
     /// 整个「连接+服务发现+订阅」包 10s 超时:btleplug 在 macOS 遇到
     /// "Event receiver died" 时 discover_services().await 永不完成,
@@ -387,7 +502,6 @@ impl VendorGattClient {
                 .ok_or_else(|| anyhow::anyhow!("未找到 Audio 特征值 (FE63)"))?;
 
             subscribe_with_ccc_fallback(&p, event, "Event").await?;
-            subscribe_with_ccc_fallback(&p, audio, "Audio").await?;
 
             Ok(GattChars {
                 cmd: cmd.clone(),
@@ -405,6 +519,8 @@ impl VendorGattClient {
             )),
         }?;
 
+        self.connection_epoch.fetch_add(1, Ordering::SeqCst);
+        self.connection_closed.notify_waiters();
         *self.peripheral.lock().unwrap() = Some(peripheral.clone());
         *self.chars.lock().unwrap() = Some(found_chars);
         // 新连接清掉上一连接可能残留的 0x60 主动断开标志
@@ -416,7 +532,7 @@ impl VendorGattClient {
 
     /// 按 [`BleConnectPacing::current`] 的节奏连接：先等一下，失败后退避重试。
     ///
-    /// 非 Windows 等价于直接调用一次 [`connect`](Self::connect)。
+    /// 非 Windows 只尝试一次；任何失败都会先清理可能残留的半截连接。
     /// `still_wanted` 在每次尝试前调用；返回 `false`（目标被取消/切换、管理器停止）
     /// 时放弃并返回错误，避免退避结束后连上一个已经不要的设备。
     pub async fn connect_with_retry(
@@ -424,43 +540,22 @@ impl VendorGattClient {
         peripheral: &Peripheral,
         still_wanted: &(dyn Fn() -> bool + Send + Sync),
     ) -> Result<()> {
-        let pacing = BleConnectPacing::current();
-        if !pacing.pre_connect_delay.is_zero() {
-            tokio::time::sleep(pacing.pre_connect_delay).await;
-        }
-        let mut attempt = 1;
-        loop {
-            if !still_wanted() {
-                return Err(anyhow::anyhow!("BLE 目标已取消或改变，放弃连接"));
-            }
-            match self.connect(peripheral).await {
-                Ok(()) => return Ok(()),
-                Err(e) if attempt < pacing.attempts => {
-                    let backoff = pacing.backoff_after(attempt);
-                    log::warn!(
-                        target: "gatt",
-                        "BLE 连接第 {}/{} 次失败: {}，{}ms 后重试",
-                        attempt,
-                        pacing.attempts,
-                        e,
-                        backoff.as_millis()
-                    );
-                    // 半截连接（已连上但服务发现超时）先断开，下一次从干净状态开始。
-                    let _ = tokio::time::timeout(
-                        std::time::Duration::from_secs(3),
-                        peripheral.disconnect(),
-                    )
-                    .await;
-                    tokio::time::sleep(backoff).await;
-                    attempt += 1;
-                }
-                Err(e) => return Err(e),
-            }
-        }
+        connect_with_pacing(
+            BleConnectPacing::current(),
+            still_wanted,
+            || self.connect(peripheral),
+            || async {
+                let _ = peripheral.disconnect().await;
+            },
+        )
+        .await
     }
 
     /// 写入命令到 Command 特征值(5s 超时)
     pub async fn send_command(&self, data: &[u8]) -> Result<()> {
+        if !self.connection_is_current(self.connection_epoch()) {
+            anyhow::bail!("Vendor GATT 会话已断开");
+        }
         let p = self
             .peripheral
             .lock()
@@ -493,70 +588,95 @@ impl VendorGattClient {
         }
     }
 
-    /// 发送命令并等待 Event 通道的匹配响应(持 write_lock 序列化)
+    /// 发送命令并等待 Event 通道的匹配响应。断开取消整个交换，包括 ATT 写等待。
     pub async fn send_command_and_read_response(
         &self,
         expected_cmd: u8,
         data: &[u8],
         timeout_ms: u64,
     ) -> Result<Vec<u8>> {
+        let epoch = self.connection_epoch();
+        self.send_command_in_session(epoch, expected_cmd, data, timeout_ms)
+            .await
+    }
+
+    pub(crate) async fn send_command_in_session(
+        &self,
+        epoch: u64,
+        expected_cmd: u8,
+        data: &[u8],
+        timeout_ms: u64,
+    ) -> Result<Vec<u8>> {
         let _write_guard = self.write_lock.lock().await;
+        let closed = self.connection_closed.notified();
+        tokio::pin!(closed);
+        closed.as_mut().enable();
+        if !self.connection_is_current(epoch) {
+            anyhow::bail!("Vendor GATT 会话已断开或更换");
+        }
         log::info!(
             target: "gatt",
             "[GATT] cmd_and_read: CMD=0x{:02X} len={} timeout={}ms",
             expected_cmd, data.len(), timeout_ms
         );
-
-        let (tx, rx) = tokio::sync::oneshot::channel::<Vec<u8>>();
-
-        // 注册 pending response
-        {
-            let mut pending = self.pending_responses.lock().unwrap();
-            if let Some(old) = pending.remove(&expected_cmd) {
-                log::warn!(target: "gatt", "[GATT] 清理残留 pending CMD=0x{:02X}", expected_cmd);
-                let _ = old.tx.send(vec![]); // oneshot:发送空响应解除旧等待
+        let (tx, mut rx) = tokio::sync::oneshot::channel::<Vec<u8>>();
+        self.pending_responses.lock().unwrap().insert(
+            expected_cmd,
+            PendingResponse {
+                cmd: expected_cmd,
+                epoch,
+                tx,
+            },
+        );
+        // Preserve an already delivered rejection response even if 60 follows
+        // immediately. Admission still checks liveness before accepting success.
+        let exchange = async {
+            tokio::select! {
+                result = self.send_command(data) => result?,
+                _ = &mut closed => {
+                    return rx.try_recv().map_err(|_| anyhow::anyhow!("GATT 会话已断开"));
+                }
             }
-            pending.insert(
-                expected_cmd,
-                PendingResponse {
-                    cmd: expected_cmd,
-                    tx,
-                },
-            );
-        }
-
-        if let Err(e) = self.send_command(data).await {
-            self.pending_responses.lock().unwrap().remove(&expected_cmd);
-            return Err(e);
-        }
-
-        match tokio::time::timeout(std::time::Duration::from_millis(timeout_ms), rx).await {
-            Ok(Ok(response)) => Ok(response),
-            Ok(Err(_)) => {
-                // oneshot 关闭(notification loop 退出时 clear 了 pending)
-                self.pending_responses.lock().unwrap().remove(&expected_cmd);
-                Err(anyhow::anyhow!(
-                    "[GATT] CMD=0x{:02X} 响应通道已关闭(notification loop 已退出)",
-                    expected_cmd
-                ))
+            tokio::select! {
+                result = tokio::time::timeout(std::time::Duration::from_millis(timeout_ms), &mut rx) => {
+                    match result {
+                        Ok(Ok(response)) => Ok(response),
+                        Ok(Err(_)) => Err(anyhow::anyhow!("GATT 响应通道已关闭")),
+                        Err(_) => Err(anyhow::anyhow!("[GATT] CMD=0x{expected_cmd:02X} 响应超时 ({timeout_ms}ms)")),
+                    }
+                }
+                _ = &mut closed => rx.try_recv().map_err(|_| anyhow::anyhow!("GATT 会话已断开")),
             }
-            Err(_) => {
-                self.pending_responses.lock().unwrap().remove(&expected_cmd);
-                Err(anyhow::anyhow!(
-                    "[GATT] CMD=0x{:02X} 响应超时 ({}ms)",
-                    expected_cmd,
-                    timeout_ms
-                ))
-            }
+        };
+        let result = exchange
+            .await
+            .or_else(|error| rx.try_recv().map_err(|_| error));
+        let mut pending = self.pending_responses.lock().unwrap();
+        if pending.get(&expected_cmd).is_some_and(|p| p.epoch == epoch) {
+            pending.remove(&expected_cmd);
         }
+        if self.connection_epoch() != epoch {
+            anyhow::bail!("GATT 响应来自已结束的会话");
+        }
+        result
     }
 
     /// 启动通知监听循环(在调用方 tokio runtime 上 spawn)
-    pub fn start_notification_loop(&self) {
-        let p = match self.peripheral.lock().unwrap().clone() {
-            Some(p) => p,
-            None => return,
-        };
+    pub async fn start_notification_loop(&self) -> Result<()> {
+        let p = self
+            .peripheral
+            .lock()
+            .unwrap()
+            .clone()
+            .ok_or_else(|| anyhow::anyhow!("Vendor GATT 未连接"))?;
+        // Subscribe to the local notification stream before sending the first
+        // command; merely spawning the listener leaves a first-response race.
+        let mut stream = tokio::time::timeout(std::time::Duration::from_secs(1), p.notifications())
+            .await
+            .map_err(|_| anyhow::anyhow!("通知流创建超时"))??;
+        let connection_epoch = self.connection_epoch();
+        let current_epoch = self.connection_epoch.clone();
+        let connection_closed = self.connection_closed.clone();
         let running = self.running.clone();
         let audio_sink = self.audio_sink.clone();
         let event_tx = self.event_tx.clone();
@@ -571,7 +691,6 @@ impl VendorGattClient {
         // Producer-owned count attached to the first packet after the lost sequence range.
         let audio_local_drops = Arc::new(AtomicU64::new(0));
         let audio_running = running.clone();
-        let connection_epoch = self.audio_connection_epoch.fetch_add(1, Ordering::SeqCst) + 1;
         let decoder = EncodedAudioDecoderSink::new(audio_sink.clone(), connection_epoch);
         let decoder_enabled = self.audio_enabled.clone();
         let decoder_route_epoch = self.audio_route_epoch.clone();
@@ -619,15 +738,14 @@ impl VendorGattClient {
             *slot = Some(audio_thread);
         }
 
+        let session = NotificationSession {
+            epoch: connection_epoch,
+            current_epoch,
+            running,
+            pending,
+            closed: connection_closed,
+        };
         let notify_handle = tokio::spawn(async move {
-            let mut stream = match p.notifications().await {
-                Ok(s) => s,
-                Err(e) => {
-                    log::warn!(target: "gatt", "通知流创建失败: {}", e);
-                    return;
-                }
-            };
-
             log::info!(target: "gatt", "通知监听已启动");
 
             let mut state = GattEventState {
@@ -642,12 +760,16 @@ impl VendorGattClient {
             let mut last_notif = tokio::time::Instant::now();
             let mut last_audio_route_epoch = producer_route_epoch.load(Ordering::SeqCst);
 
-            while running.load(Ordering::SeqCst) {
-                tokio::select! {
-                    notification = stream.next() => {
+            while session.current() {
+                match session.next(&mut stream, last_notif + heartbeat).await {
+                    NotificationPoll::Stopped => break,
+                    NotificationPoll::Message(notification) => {
                         last_notif = tokio::time::Instant::now();
                         match notification {
                             Some(notif) => {
+                                if !session.current() {
+                                    break;
+                                }
                                 notif_count += 1;
                                 if notif.uuid == audio_uuid {
                                     audio_count += 1;
@@ -690,7 +812,10 @@ impl VendorGattClient {
                                         }
                                     }
                                 } else if notif.uuid == event_uuid {
-                                    handle_event(&notif.value, &mut state, &event_tx, &pending);
+                                    if !session.dispatch_event(&notif.value, &mut state, &event_tx)
+                                    {
+                                        break;
+                                    }
                                 } else {
                                     log::warn!(target: "gatt", "收到未知 UUID 通知: {:?}", notif.uuid);
                                 }
@@ -701,13 +826,18 @@ impl VendorGattClient {
                             }
                         }
                     }
-                    _ = tokio::time::sleep_until(last_notif + heartbeat) => {
-                        match p.is_connected().await {
-                            Ok(false) | Err(_) => {
+                    NotificationPoll::Heartbeat => {
+                        match tokio::time::timeout(
+                            std::time::Duration::from_secs(1),
+                            p.is_connected(),
+                        )
+                        .await
+                        {
+                            Ok(Ok(false)) | Ok(Err(_)) | Err(_) => {
                                 log::info!(target: "gatt", "心跳:10s 无通知且设备已断开");
                                 break;
                             }
-                            Ok(true) => {
+                            Ok(Ok(true)) => {
                                 last_notif = tokio::time::Instant::now();
                             }
                         }
@@ -718,9 +848,7 @@ impl VendorGattClient {
             // 断开时把还按着的键交代清楚：只发过按下、没发过松开的话，
             // 消费方会一直以为那个键按着（语音键卡住尤其难受——录音停不下来）。
             // 与 USB 监控线程退出时的收尾对齐。
-            state.release_all(&event_tx);
-            pending.lock().unwrap().clear();
-            running.store(false, Ordering::SeqCst);
+            session.finish(&mut state, &event_tx);
             log::info!(target: "gatt", "通知监听已退出");
         });
         // 保存 JoinHandle,disconnect 时 await —— 防止重连时旧 task 的 pending.clear()
@@ -728,11 +856,75 @@ impl VendorGattClient {
         if let Ok(mut slot) = self.notify_handle.lock() {
             *slot = Some(notify_handle);
         }
+        Ok(())
+    }
+
+    pub(crate) async fn subscribe_audio(&self, epoch: u64) -> Result<()> {
+        let closed = self.connection_closed.notified();
+        tokio::pin!(closed);
+        closed.as_mut().enable();
+        if !self.connection_is_current(epoch) {
+            anyhow::bail!("BLE 音频订阅前会话已结束");
+        }
+        let p = self
+            .peripheral
+            .lock()
+            .unwrap()
+            .clone()
+            .ok_or_else(|| anyhow::anyhow!("Vendor GATT 未连接"))?;
+        let chars = self
+            .chars
+            .lock()
+            .unwrap()
+            .clone()
+            .ok_or_else(|| anyhow::anyhow!("GATT 特征值未发现"))?;
+        tokio::select! {
+            result = subscribe_with_ccc_fallback(&p, &chars.audio, "Audio") => result?,
+            _ = &mut closed => anyhow::bail!("BLE 音频订阅期间会话已结束"),
+        }
+        if !self.connection_is_current(epoch) {
+            anyhow::bail!("BLE 音频订阅结果来自已结束的会话");
+        }
+        Ok(())
+    }
+
+    pub(crate) fn connection_epoch(&self) -> u64 {
+        self.connection_epoch.load(Ordering::SeqCst)
+    }
+
+    pub(crate) fn connection_is_current(&self, epoch: u64) -> bool {
+        self.connection_epoch() == epoch
+            && self.running.load(Ordering::SeqCst)
+            && self.device_disconnect_reason.load(Ordering::SeqCst) == 0
+    }
+
+    pub(crate) fn device_disconnect_reason(&self, epoch: u64) -> Option<u8> {
+        if self.connection_epoch() != epoch {
+            return None;
+        }
+        let reason = self.device_disconnect_reason.load(Ordering::SeqCst);
+        (reason != 0).then_some(reason)
+    }
+
+    pub(crate) async fn connection_is_active(&self, epoch: u64) -> bool {
+        if !self.connection_is_current(epoch) {
+            return false;
+        }
+        let p = self.peripheral.lock().unwrap().clone();
+        let Some(p) = p else {
+            return false;
+        };
+        let connected = matches!(
+            tokio::time::timeout(std::time::Duration::from_secs(1), p.is_connected()).await,
+            Ok(Ok(true))
+        );
+        connected && self.connection_is_current(epoch)
     }
 
     /// 断开连接(含 3s 超时保护,避免 disconnect().await 卡死)
     pub async fn disconnect(&self) -> Result<()> {
         self.running.store(false, Ordering::SeqCst);
+        self.connection_closed.notify_waiters();
 
         let p = self.peripheral.lock().unwrap().take();
         let c = self.chars.lock().unwrap().take();
@@ -753,8 +945,16 @@ impl VendorGattClient {
         // 导致新会话的命令交互超时。task 自身已有 heartbeat + is_connected 兜底,
         // 但设备断开不一定让 `notifications().next()` 立即返回 None,这里加 3s 超时保护。
         let notify_handle = self.notify_handle.lock().unwrap().take();
-        if let Some(h) = notify_handle {
-            let _ = tokio::time::timeout(std::time::Duration::from_secs(3), h).await;
+        if let Some(mut h) = notify_handle {
+            if tokio::time::timeout(std::time::Duration::from_secs(3), &mut h)
+                .await
+                .is_err()
+            {
+                // Dropping a timed-out JoinHandle detaches the old listener. Abort
+                // and join it before allowing any replacement session.
+                h.abort();
+                let _ = h.await;
+            }
         }
 
         // join 音频线程(它在 running=false 后最多 1s 退出,join 同样加超时保护)。
@@ -1015,6 +1215,83 @@ mod name_and_pacing_tests {
             assert_eq!(pacing.connect_timeout, std::time::Duration::from_secs(10));
         }
     }
+
+    #[tokio::test(start_paused = true)]
+    async fn final_connect_failure_cleans_up_the_partial_link() {
+        let calls = Mutex::new(Vec::new());
+        let pacing = BleConnectPacing {
+            pre_connect_delay: std::time::Duration::ZERO,
+            attempts: 1,
+            ..BleConnectPacing::current()
+        };
+        let error = connect_with_pacing(
+            pacing,
+            &|| true,
+            || async {
+                calls.lock().unwrap().push("connect");
+                Err(anyhow::anyhow!("service discovery timed out"))
+            },
+            || async {
+                calls.lock().unwrap().push("disconnect");
+            },
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(error.to_string(), "service discovery timed out");
+        assert_eq!(*calls.lock().unwrap(), ["connect", "disconnect"]);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn hung_final_cleanup_is_bounded_and_preserves_the_connect_error() {
+        let start = tokio::time::Instant::now();
+        let pacing = BleConnectPacing {
+            pre_connect_delay: std::time::Duration::ZERO,
+            attempts: 1,
+            ..BleConnectPacing::current()
+        };
+        let error = connect_with_pacing(
+            pacing,
+            &|| true,
+            || async { Err(anyhow::anyhow!("event subscription failed")) },
+            std::future::pending,
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(error.to_string(), "event subscription failed");
+        assert_eq!(start.elapsed(), std::time::Duration::from_secs(3));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn retry_cleans_up_before_reconnecting_and_keeps_a_successful_link() {
+        let calls = Mutex::new(Vec::new());
+        let start = tokio::time::Instant::now();
+        let pacing = BleConnectPacing {
+            pre_connect_delay: std::time::Duration::ZERO,
+            attempts: 3,
+            first_backoff: std::time::Duration::from_secs(1),
+            ..BleConnectPacing::current()
+        };
+        connect_with_pacing(
+            pacing,
+            &|| true,
+            || async {
+                let mut calls = calls.lock().unwrap();
+                calls.push("connect");
+                if calls.len() == 1 {
+                    Err(anyhow::anyhow!("first attempt failed"))
+                } else {
+                    Ok(())
+                }
+            },
+            || async {
+                calls.lock().unwrap().push("disconnect");
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(*calls.lock().unwrap(), ["connect", "disconnect", "connect"]);
+        assert_eq!(start.elapsed(), std::time::Duration::from_secs(1));
+    }
 }
 
 #[cfg(test)]
@@ -1039,6 +1316,119 @@ mod tests {
             (key_value & 0xFF) as u8,
             ((key_value >> 8) & 0xFF) as u8,
         ]
+    }
+
+    fn notification_session() -> NotificationSession {
+        NotificationSession {
+            epoch: 1,
+            current_epoch: Arc::new(AtomicU64::new(1)),
+            running: Arc::new(AtomicBool::new(true)),
+            pending: Arc::new(Mutex::new(HashMap::new())),
+            closed: Arc::new(tokio::sync::Notify::new()),
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn explicit_disconnect_cancels_pending_and_releases_held_voice_immediately() {
+        let session = notification_session();
+        let (tx, mut events) = broadcast::channel(16);
+        let mut state = GattEventState::default();
+        assert!(session.dispatch_event(&key_frame(AI_VOICE_MEDIA_CODE), &mut state, &tx));
+        drain(&mut events);
+        let (response_tx, mut response_rx) = tokio::sync::oneshot::channel();
+        session.pending.lock().unwrap().insert(
+            0x74,
+            PendingResponse {
+                cmd: 0x74,
+                epoch: 1,
+                tx: response_tx,
+            },
+        );
+
+        assert!(!session.dispatch_event(&[0x60, 1, 3], &mut state, &tx));
+        assert!(!session.current());
+        assert_eq!(state.device_disconnect_reason.load(Ordering::SeqCst), 3);
+        assert!(matches!(
+            response_rx.try_recv(),
+            Err(tokio::sync::oneshot::error::TryRecvError::Closed)
+        ));
+        assert!(drain(&mut events).iter().any(|event| matches!(
+            event,
+            BoardEvent::AiVoiceKey(AiVoiceKeyEvent { pressed: false })
+        )));
+    }
+
+    #[tokio::test]
+    async fn identity_rejection_response_survives_an_immediate_reason_03_close() {
+        let session = notification_session();
+        let (tx, _events) = broadcast::channel(8);
+        let mut state = GattEventState::default();
+        let (response_tx, mut response_rx) = tokio::sync::oneshot::channel();
+        session.pending.lock().unwrap().insert(
+            0x74,
+            PendingResponse {
+                cmd: 0x74,
+                epoch: 1,
+                tx: response_tx,
+            },
+        );
+        assert!(session.dispatch_event(&[0x74, 1, 1], &mut state, &tx));
+        assert!(!session.dispatch_event(&[0x60, 1, 3], &mut state, &tx));
+        assert_eq!(response_rx.try_recv().unwrap(), vec![0x74, 1, 1]);
+        assert_eq!(state.device_disconnect_reason.load(Ordering::SeqCst), 3);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn closing_a_silent_stream_wakes_before_heartbeat_and_preserves_release_cleanup() {
+        let session = notification_session();
+        let (tx, mut events) = broadcast::channel(16);
+        let mut state = GattEventState::default();
+        session.dispatch_event(&key_frame(AI_VOICE_MEDIA_CODE), &mut state, &tx);
+        drain(&mut events);
+        let mut stream = futures_util::stream::pending();
+        let now = tokio::time::Instant::now();
+        let close = async {
+            tokio::task::yield_now().await;
+            session.running.store(false, Ordering::SeqCst);
+            session.closed.notify_waiters();
+        };
+        let (poll, ()) = tokio::join!(
+            session.next(&mut stream, now + std::time::Duration::from_secs(10)),
+            close
+        );
+        assert!(matches!(poll, NotificationPoll::Stopped));
+        assert_eq!(tokio::time::Instant::now(), now);
+        session.finish(&mut state, &tx);
+        assert!(drain(&mut events).iter().any(|event| matches!(
+            event,
+            BoardEvent::AiVoiceKey(AiVoiceKeyEvent { pressed: false })
+        )));
+    }
+
+    #[tokio::test]
+    async fn stale_notification_loop_cannot_clear_new_pending_or_end_new_session() {
+        let session = notification_session();
+        let (tx, mut events) = broadcast::channel(8);
+        let mut state = GattEventState::default();
+        let (response_tx, mut response_rx) = tokio::sync::oneshot::channel();
+        session.current_epoch.store(2, Ordering::SeqCst);
+        session.pending.lock().unwrap().insert(
+            0x74,
+            PendingResponse {
+                cmd: 0x74,
+                epoch: 2,
+                tx: response_tx,
+            },
+        );
+        assert!(!session.dispatch_event(&[0x60, 1, 3], &mut state, &tx));
+        session.finish(&mut state, &tx);
+        assert!(session.running.load(Ordering::SeqCst));
+        assert!(matches!(
+            response_rx.try_recv(),
+            Err(tokio::sync::oneshot::error::TryRecvError::Empty)
+        ));
+        assert!(drain(&mut events).is_empty());
+        assert_eq!(state.device_disconnect_reason.load(Ordering::SeqCst), 0);
     }
 
     #[test]

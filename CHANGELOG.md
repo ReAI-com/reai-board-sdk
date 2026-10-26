@@ -5,6 +5,23 @@ follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Fixed
+
+- Authenticate BLE host identity before capability discovery on firmware 1.75.
+  A bound board only accepts `0x74` until authentication, so the former
+  `0x6E`-first sequence could never reconnect after USB binding. Event reception
+  is ready before the identity request; audio subscription follows authentication.
+- Handle firmware 1.75's actual unbound identity reply (`0x01`) by confirming
+  its binding status. A reason-`0x03` close alone no longer claims another host
+  owns the board: it can also mean the identity deadline expired.
+- Require a live connection generation and successful protocol evidence before
+  announcing BLE connectivity. Old firmware that ignores identity/capability
+  commands must answer device information; repeated timeouts never suffice.
+- End pending exchanges immediately on device-disconnect notifications. Local
+  shutdown wakes the notification loop to release held keys, and stale loops
+  cannot clear a replacement connection's pending requests. Audio subscription
+  remains bounded and is cancelled when the connection closes.
+
 ## [0.3.5] — 2026-10-24
 
 ### Fixed

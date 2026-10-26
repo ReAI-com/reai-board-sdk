@@ -3,4 +3,5 @@
 //! V2:`gatt_client` tokio 化重写(删 ble_run 同步包装,直接 await btleplug)。
 
 pub mod gatt_client;
+pub(crate) mod handshake;
 pub mod system_devices;
