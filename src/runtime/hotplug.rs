@@ -41,6 +41,18 @@ use crate::runtime::ble::{
 #[cfg(feature = "usb")]
 use crate::runtime::usb::probe::{self, ProbeTiming};
 
+/// 权限未就绪造成的连接期探测/初始化失败的有界补跑次数（每 5s 一次，合计约 20 分钟）。
+/// 输入监控授权对运行中的进程实时生效（macOS 26 真机验证，2026-11-08）：用户在系统设置
+/// 里点开授权后，本进程的下一次补跑就能成功，不需要重启 App 或拔插设备。
+#[cfg(feature = "usb")]
+pub(crate) const PERMISSION_SELF_HEAL_RETRIES: usize = 240;
+
+/// macOS IOHID 的「未授权」失败特征：`IOHIDDeviceSetReport failed: (0xE00002E2)
+/// (iokit/common) not permitted`（hidapi 把 IOKit 错误文本原样带出）。
+pub(crate) fn is_permission_denial(detail: &str) -> bool {
+    detail.contains("not permitted") || detail.contains("0xE00002E2")
+}
+
 // ============ CFRunLoop 辅助（macOS hidapi 兼容） ============
 
 /// 在带活跃 CFRunLoop 的专用线程上运行阻塞闭包。
@@ -927,26 +939,31 @@ impl HotplugManager {
         // 2) 广播 BoardEvent::DeviceInfo（消费者据此展示，无需手动 read）
         // 按 webTest 的节奏：打开后等 800ms，0x13 每次等 1.5s、最多 6 次，只认校验过的应答；
         // 读不到就明确上报错误，绝不拿未校验的数据推导 BLE 目标。不影响 USB 按键主线。
+        // 权限未就绪（macOS 输入监控对运行中进程实时生效，2026-11-08 真机验证）造成的失败
+        // 是瞬态的：有界补跑（见 PERMISSION_SELF_HEAL_RETRIES），成功后走同一条成功路径，
+        // 不再要求用户拔插重试。
         let probe = self.probe_usb_device_info_paced().await;
         match probe {
-            Ok(info) => {
-                #[cfg(feature = "ble")]
-                {
-                    let ble_name = format!("REAI_VB_{}", info.chip_id);
-                    log::info!(target: "hotplug", "USB 读到 chip_id={} → BLE 目标 {}", info.chip_id, ble_name);
-                    self.set_ble_target(Some(&ble_name));
-                }
-                let _ = self.event_tx.send(BoardEvent::DeviceInfo(info));
-            }
+            Ok(info) => self.adopt_probed_usb_device_info(info),
             Err(None) => {}
             Err(Some(detail)) => {
                 log::warn!(target: "hotplug", "USB 设备信息读取失败: {}", detail);
+                let permission_denied = is_permission_denial(&detail);
                 self.emit_error(
-                    format!(
-                        "USB 已连接，但读取设备信息（CMD 0x13）失败，BLE 回连目标未更新；请拔插 USB 后重试。详情: {detail}"
-                    ),
+                    if permission_denied {
+                        format!(
+                            "USB 已连接，但读取设备信息（CMD 0x13）失败：输入监控未授权。授权后自动补跑，无需拔插。详情: {detail}"
+                        )
+                    } else {
+                        format!(
+                            "USB 已连接，但读取设备信息（CMD 0x13）失败，BLE 回连目标未更新；请拔插 USB 后重试。详情: {detail}"
+                        )
+                    },
                     true,
                 );
+                if permission_denied {
+                    self.retry_probing_usb_device_info().await;
+                }
             }
         }
 
@@ -955,6 +972,45 @@ impl HotplugManager {
         monitor.stop();
         log::info!(target: "hid", "USB 设备已断开: {:?}", reason);
         self.notify_disconnected(reason);
+    }
+
+    /// 探测成功的收口：设 BLE 回连目标并广播设备信息（补跑与首次探测共用同一条路径）。
+    #[cfg(feature = "usb")]
+    fn adopt_probed_usb_device_info(&self, info: DeviceInfo) {
+        #[cfg(feature = "ble")]
+        {
+            let ble_name = format!("REAI_VB_{}", info.chip_id);
+            log::info!(target: "hotplug", "USB 读到 chip_id={} → BLE 目标 {}", info.chip_id, ble_name);
+            self.set_ble_target(Some(&ble_name));
+        }
+        let _ = self.event_tx.send(BoardEvent::DeviceInfo(info));
+    }
+
+    /// 权限未就绪造成的设备信息探测失败的有界补跑：每 5s 一次，至多
+    /// [`PERMISSION_SELF_HEAL_RETRIES`] 次。期间设备消失 / 运行停止即退出；成功走
+    /// [`Self::adopt_probed_usb_device_info`]。
+    #[cfg(feature = "usb")]
+    async fn retry_probing_usb_device_info(&self) {
+        for attempt in 1..=PERMISSION_SELF_HEAL_RETRIES {
+            tokio::time::sleep(Duration::from_secs(5)).await;
+            if !self.running.load(Ordering::SeqCst) || self.is_stop_requested() {
+                return;
+            }
+            if Self::detect_hid_connection_async().await.is_none() {
+                log::info!(target: "hotplug", "USB 设备已不在，停止设备信息补跑");
+                self.notify_disconnected(DisconnectReason::DeviceGone);
+                return;
+            }
+            match self.probe_usb_device_info_paced().await {
+                Ok(info) => {
+                    log::info!(target: "hotplug", "USB 设备信息补跑成功（第 {attempt} 次重试）");
+                    self.adopt_probed_usb_device_info(info);
+                    return;
+                }
+                Err(_) => continue,
+            }
+        }
+        log::warn!(target: "hotplug", "USB 设备信息补跑达到上限（{PERMISSION_SELF_HEAL_RETRIES} 次）仍未成功");
     }
 
     #[cfg(feature = "usb")]
@@ -1350,6 +1406,25 @@ impl HotplugManager {
 #[cfg(all(test, feature = "usb"))]
 mod tests {
     use super::*;
+
+    #[test]
+    fn permission_denial_matches_macos_iokit_signatures_only() {
+        // 真机日志原文（2026-11-08）：IOHIDDeviceSetReport / 0xE00002E2 / not permitted。
+        assert!(is_permission_denial(
+            "hidapi error: IOHIDDeviceSetReport failed: (0xE00002E2) (iokit/common) not permitted"
+        ));
+        assert!(is_permission_denial(
+            "hidapi error: IOHIDDeviceOpen failed: (0xE00002E2) not permitted"
+        ));
+        // 非权限类瞬时失败（超时 / 设备消失 / 协议错）不进入补跑。
+        assert!(!is_permission_denial(
+            "hid_read_timeout: error waiting for more data"
+        ));
+        assert!(!is_permission_denial(
+            "CMD 0x13 第 6/6 轮无有效应答: 校验不符"
+        ));
+        assert!(!is_permission_denial("设备信息响应长度不足: 12"));
+    }
 
     #[test]
     fn explicit_usb_hid_connects_without_waiting_for_audio() {
