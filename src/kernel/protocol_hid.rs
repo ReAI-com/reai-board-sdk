@@ -1326,9 +1326,9 @@ impl KeyConfig {
     pub fn to_bytes(&self) -> [u8; KEY_DATA_LEN] {
         let mut data = [0u8; KEY_DATA_LEN];
 
-        for i in 0..KEY_COUNT {
+        for (i, key) in self.keys.iter().enumerate().take(KEY_COUNT) {
             let offset = i * 3;
-            let bytes = self.keys[i].to_bytes();
+            let bytes = key.to_bytes();
             data[offset] = bytes[0];
             data[offset + 1] = bytes[1];
             data[offset + 2] = bytes[2];
@@ -1361,8 +1361,8 @@ impl KeyConfig {
 
     /// 清理未使用的按键（索引12-19）为 00 00 00
     pub fn clear_unused_keys(&mut self) {
-        for i in ACTIVE_KEY_COUNT..KEY_COUNT {
-            self.keys[i] = KeyInfo::new(0x00, 0x00, 0x00);
+        for key in self.keys.iter_mut().take(KEY_COUNT).skip(ACTIVE_KEY_COUNT) {
+            *key = KeyInfo::new(0x00, 0x00, 0x00);
         }
     }
 }
@@ -1381,9 +1381,9 @@ impl Default for KeyConfig {
         let mut config = Self::new();
 
         // 设置默认配置
-        for i in 0..ACTIVE_KEY_COUNT {
+        for (i, key) in config.keys.iter_mut().enumerate().take(ACTIVE_KEY_COUNT) {
             let default_value = get_default_key_value(i);
-            config.keys[i] = KeyInfo::new(
+            *key = KeyInfo::new(
                 KeyClass::Media as u8,
                 (default_value & 0xFF) as u8,
                 ((default_value >> 8) & 0xFF) as u8,
@@ -1391,8 +1391,13 @@ impl Default for KeyConfig {
         }
 
         // 未使用的按键填充 00 00 00
-        for i in ACTIVE_KEY_COUNT..KEY_COUNT {
-            config.keys[i] = KeyInfo::new(0x00, 0x00, 0x00);
+        for key in config
+            .keys
+            .iter_mut()
+            .take(KEY_COUNT)
+            .skip(ACTIVE_KEY_COUNT)
+        {
+            *key = KeyInfo::new(0x00, 0x00, 0x00);
         }
 
         config
