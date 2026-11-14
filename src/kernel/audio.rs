@@ -10,6 +10,7 @@ pub const AUDIO_CAP_BLE_GATT_MSBC_V1: u32 = 1 << 1;
 pub const AUDIO_CAP_STREAM_CONTROL_V1: u32 = 1 << 2;
 pub const AUDIO_CAP_PACKET_SEQUENCE_V1: u32 = 1 << 3;
 pub const AUDIO_CAP_HOST_BINDING_V1: u32 = 1 << 4;
+pub const AUDIO_CAP_BLE_GATT_FLOW_V1: u32 = 1 << 5;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -38,6 +39,8 @@ pub struct AudioCapabilities {
     pub packet_sequence_v1: bool,
     /// 主机绑定（CMD 0x71-0x74 + 连接后身份校验，固件 #13）。
     pub host_binding_v1: bool,
+    /// BLE GATT 写流控与连接参数增强（FE61 WriteWithoutResponse + 15s 租约 + 40ms 礼让，固件 >= 1.78）。
+    pub ble_gatt_flow_v1: bool,
     pub envelope_version: u8,
     pub usb_max_payload: u8,
     pub ble_max_payload: u8,
@@ -62,6 +65,7 @@ impl AudioCapabilities {
             stream_control_v1: bits & AUDIO_CAP_STREAM_CONTROL_V1 != 0,
             packet_sequence_v1: bits & AUDIO_CAP_PACKET_SEQUENCE_V1 != 0,
             host_binding_v1: bits & AUDIO_CAP_HOST_BINDING_V1 != 0,
+            ble_gatt_flow_v1: bits & AUDIO_CAP_BLE_GATT_FLOW_V1 != 0,
             envelope_version,
             usb_max_payload,
             ble_max_payload,
@@ -139,6 +143,40 @@ mod capability_state_tests {
         let state = AudioCapabilityState::Ready(capabilities);
         assert_eq!(state.capabilities(), capabilities);
         assert!(state.is_ready());
+    }
+
+    #[test]
+    fn from_bits_decodes_ble_gatt_flow_v1_without_breaking_legacy_ble_support() {
+        let legacy_bits = AUDIO_CAP_USB_VENDOR_HID_MSBC_V1
+            | AUDIO_CAP_BLE_GATT_MSBC_V1
+            | AUDIO_CAP_STREAM_CONTROL_V1
+            | AUDIO_CAP_PACKET_SEQUENCE_V1
+            | AUDIO_CAP_HOST_BINDING_V1;
+        let legacy = AudioCapabilities::from_bits(
+            AUDIO_PROTOCOL_VERSION,
+            legacy_bits,
+            AUDIO_PROTOCOL_VERSION,
+            60,
+            60,
+            5_000,
+            10_000,
+        );
+        assert!(!legacy.ble_gatt_flow_v1);
+        assert!(legacy.supports(AudioTransport::BleGatt));
+
+        let upgraded = AudioCapabilities::from_bits(
+            AUDIO_PROTOCOL_VERSION,
+            legacy_bits | AUDIO_CAP_BLE_GATT_FLOW_V1,
+            AUDIO_PROTOCOL_VERSION,
+            60,
+            60,
+            15_000,
+            30_000,
+        );
+        assert!(upgraded.ble_gatt_flow_v1);
+        assert!(upgraded.supports(AudioTransport::BleGatt));
+        assert_eq!(upgraded.default_ttl_ms, 15_000);
+        assert_eq!(upgraded.max_ttl_ms, 30_000);
     }
 }
 

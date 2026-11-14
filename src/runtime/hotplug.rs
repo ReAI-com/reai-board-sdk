@@ -12,6 +12,8 @@
 //! `tokio::task::spawn_blocking` 包装;BLE client 调用 `.await`。
 //! 四阶段状态机骨架与 V1 一致(实战验证过,不重构为 select!,避免引入时序 bug)。
 
+#[cfg(feature = "ble")]
+use std::sync::atomic::AtomicU32;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -40,6 +42,17 @@ use crate::runtime::ble::{
 };
 #[cfg(feature = "usb")]
 use crate::runtime::usb::probe::{self, ProbeTiming};
+
+/// 权限未就绪造成的连接期探测/初始化失败的有界补跑次数（每 5s 一次，合计约 20 分钟）。
+/// 输入监控授权对运行中的进程实时生效（macOS 26 真机验证，2026-11-08）：用户在系统设置
+/// 里点开授权后，本进程的下一次补跑就能成功，不需要重启 App 或拔插设备。
+pub(crate) const PERMISSION_SELF_HEAL_RETRIES: usize = 240;
+
+/// macOS IOHID 的「未授权」失败特征：`IOHIDDeviceSetReport failed: (0xE00002E2)
+/// (iokit/common) not permitted`（hidapi 把 IOKit 错误文本原样带出）。
+pub(crate) fn is_permission_denial(detail: &str) -> bool {
+    detail.contains("not permitted") || detail.contains("0xE00002E2")
+}
 
 // ============ CFRunLoop 辅助（macOS hidapi 兼容） ============
 
@@ -455,6 +468,8 @@ pub struct HotplugManager {
     ble_auto_connect: Arc<AtomicBool>,
     #[cfg(feature = "ble")]
     on_ble_device_name_updated: Option<OnBleDeviceNameUpdated>,
+    #[cfg(feature = "ble")]
+    ble_consecutive_failures: AtomicU32,
     /// Windows「被系统蓝牙占用」提示是否已报过（条件消失后复位）。
     #[cfg_attr(not(all(feature = "usb", target_os = "windows")), allow(dead_code))]
     system_bluetooth_reported: AtomicBool,
@@ -473,6 +488,17 @@ fn ble_disconnect_reason(reason: Option<u8>) -> DisconnectReason {
         DisconnectReason::DeviceDisconnect
     } else {
         DisconnectReason::DeviceGone
+    }
+}
+
+/// 已知 BLE 目标断连后的首轮失败（例如旧固件刚断开前 2.5s 处于定向广播窗口）用 1s 快速重扫，
+/// 连续失败第 2 次起退回 5s，兼顾快速回连与设备离线时的后台功耗。
+#[cfg(feature = "ble")]
+fn ble_post_failure_retry_delay(has_target: bool, consecutive_failures: u32) -> Duration {
+    if has_target && consecutive_failures <= 1 {
+        Duration::from_secs(1)
+    } else {
+        Duration::from_secs(5)
     }
 }
 
@@ -496,6 +522,8 @@ impl HotplugManager {
             ble_auto_connect: Arc::new(AtomicBool::new(true)),
             #[cfg(feature = "ble")]
             on_ble_device_name_updated: None,
+            #[cfg(feature = "ble")]
+            ble_consecutive_failures: AtomicU32::new(0),
             system_bluetooth_reported: AtomicBool::new(false),
             host_token: Arc::new(Mutex::new(None)),
             ble_bound_by_other: Arc::new(AtomicBool::new(false)),
@@ -607,6 +635,7 @@ impl HotplugManager {
     #[cfg(feature = "ble")]
     pub fn set_ble_target(&self, name: Option<&str>) {
         *self.ble_last_device_name.lock().unwrap() = name.map(|s| s.to_string());
+        self.ble_consecutive_failures.store(0, Ordering::SeqCst);
     }
 
     pub fn stop(&self) {
@@ -927,26 +956,31 @@ impl HotplugManager {
         // 2) 广播 BoardEvent::DeviceInfo（消费者据此展示，无需手动 read）
         // 按 webTest 的节奏：打开后等 800ms，0x13 每次等 1.5s、最多 6 次，只认校验过的应答；
         // 读不到就明确上报错误，绝不拿未校验的数据推导 BLE 目标。不影响 USB 按键主线。
+        // 权限未就绪（macOS 输入监控对运行中进程实时生效，2026-11-08 真机验证）造成的失败
+        // 是瞬态的：有界补跑（见 PERMISSION_SELF_HEAL_RETRIES），成功后走同一条成功路径，
+        // 不再要求用户拔插重试。
         let probe = self.probe_usb_device_info_paced().await;
         match probe {
-            Ok(info) => {
-                #[cfg(feature = "ble")]
-                {
-                    let ble_name = format!("REAI_VB_{}", info.chip_id);
-                    log::info!(target: "hotplug", "USB 读到 chip_id={} → BLE 目标 {}", info.chip_id, ble_name);
-                    self.set_ble_target(Some(&ble_name));
-                }
-                let _ = self.event_tx.send(BoardEvent::DeviceInfo(info));
-            }
+            Ok(info) => self.adopt_probed_usb_device_info(info),
             Err(None) => {}
             Err(Some(detail)) => {
                 log::warn!(target: "hotplug", "USB 设备信息读取失败: {}", detail);
+                let permission_denied = is_permission_denial(&detail);
                 self.emit_error(
-                    format!(
-                        "USB 已连接，但读取设备信息（CMD 0x13）失败，BLE 回连目标未更新；请拔插 USB 后重试。详情: {detail}"
-                    ),
+                    if permission_denied {
+                        format!(
+                            "USB 已连接，但读取设备信息（CMD 0x13）失败：输入监控未授权。授权后自动补跑，无需拔插。详情: {detail}"
+                        )
+                    } else {
+                        format!(
+                            "USB 已连接，但读取设备信息（CMD 0x13）失败，BLE 回连目标未更新；请拔插 USB 后重试。详情: {detail}"
+                        )
+                    },
                     true,
                 );
+                if permission_denied {
+                    self.retry_probing_usb_device_info().await;
+                }
             }
         }
 
@@ -955,6 +989,45 @@ impl HotplugManager {
         monitor.stop();
         log::info!(target: "hid", "USB 设备已断开: {:?}", reason);
         self.notify_disconnected(reason);
+    }
+
+    /// 探测成功的收口：设 BLE 回连目标并广播设备信息（补跑与首次探测共用同一条路径）。
+    #[cfg(feature = "usb")]
+    fn adopt_probed_usb_device_info(&self, info: DeviceInfo) {
+        #[cfg(feature = "ble")]
+        {
+            let ble_name = format!("REAI_VB_{}", info.chip_id);
+            log::info!(target: "hotplug", "USB 读到 chip_id={} → BLE 目标 {}", info.chip_id, ble_name);
+            self.set_ble_target(Some(&ble_name));
+        }
+        let _ = self.event_tx.send(BoardEvent::DeviceInfo(info));
+    }
+
+    /// 权限未就绪造成的设备信息探测失败的有界补跑：每 5s 一次，至多
+    /// [`PERMISSION_SELF_HEAL_RETRIES`] 次。期间设备消失 / 运行停止即退出；成功走
+    /// [`Self::adopt_probed_usb_device_info`]。
+    #[cfg(feature = "usb")]
+    async fn retry_probing_usb_device_info(&self) {
+        for attempt in 1..=PERMISSION_SELF_HEAL_RETRIES {
+            tokio::time::sleep(Duration::from_secs(5)).await;
+            if !self.running.load(Ordering::SeqCst) || self.is_stop_requested() {
+                return;
+            }
+            if Self::detect_hid_connection_async().await.is_none() {
+                log::info!(target: "hotplug", "USB 设备已不在，停止设备信息补跑");
+                self.notify_disconnected(DisconnectReason::DeviceGone);
+                return;
+            }
+            match self.probe_usb_device_info_paced().await {
+                Ok(info) => {
+                    log::info!(target: "hotplug", "USB 设备信息补跑成功（第 {attempt} 次重试）");
+                    self.adopt_probed_usb_device_info(info);
+                    return;
+                }
+                Err(_) => continue,
+            }
+        }
+        log::warn!(target: "hotplug", "USB 设备信息补跑达到上限（{PERMISSION_SELF_HEAL_RETRIES} 次）仍未成功");
     }
 
     #[cfg(feature = "usb")]
@@ -1031,7 +1104,9 @@ impl HotplugManager {
                         self.emit_error(format!("BLE 扫描未发现设备: {e}"), true);
                     }
                 }
-                tokio::time::sleep(Duration::from_secs(5)).await;
+                let failures = self.ble_consecutive_failures.fetch_add(1, Ordering::SeqCst) + 1;
+                let retry_delay = ble_post_failure_retry_delay(target.is_some(), failures);
+                tokio::time::sleep(retry_delay).await;
                 return;
             }
         };
@@ -1068,9 +1143,16 @@ impl HotplugManager {
             }
         };
         if let Err(e) = client.connect_with_retry(&peripheral, &still_wanted).await {
-            log::warn!(target: "hotplug", "BLE 连接失败: {},5s 后重试", e);
+            let failures = self.ble_consecutive_failures.fetch_add(1, Ordering::SeqCst) + 1;
+            let retry_delay = ble_post_failure_retry_delay(true, failures);
+            log::warn!(
+                target: "hotplug",
+                "BLE 连接失败: {},{}s 后重试",
+                e,
+                retry_delay.as_secs()
+            );
             self.emit_error(format!("BLE 连接失败: {e}"), true);
-            tokio::time::sleep(Duration::from_secs(5)).await;
+            tokio::time::sleep(retry_delay).await;
             return;
         }
 
@@ -1083,10 +1165,12 @@ impl HotplugManager {
         // Receive Event notifications before identity; bound 1.75 rejects 6E
         // until 74 succeeds. Audio subscription follows admission, not before it.
         if let Err(error) = client.start_notification_loop().await {
+            let failures = self.ble_consecutive_failures.fetch_add(1, Ordering::SeqCst) + 1;
+            let retry_delay = ble_post_failure_retry_delay(true, failures);
             log::warn!(target: "hotplug", "BLE 通知监听启动失败: {}", error);
             let _ = client.disconnect().await;
             self.emit_error(format!("BLE 通知监听启动失败: {error}"), true);
-            tokio::time::sleep(Duration::from_secs(5)).await;
+            tokio::time::sleep(retry_delay).await;
             return;
         }
         let epoch = client.connection_epoch();
@@ -1120,6 +1204,8 @@ impl HotplugManager {
                 return;
             }
             Err(error) => {
+                let failures = self.ble_consecutive_failures.fetch_add(1, Ordering::SeqCst) + 1;
+                let retry_delay = ble_post_failure_retry_delay(true, failures);
                 let reason = client.device_disconnect_reason(epoch);
                 let _ = client.disconnect().await;
                 self.notify_disconnected(ble_disconnect_reason(reason));
@@ -1129,11 +1215,12 @@ impl HotplugManager {
                 };
                 log::warn!(target: "hotplug", "{}", message);
                 self.emit_error(message.to_string(), true);
-                tokio::time::sleep(Duration::from_secs(5)).await;
+                tokio::time::sleep(retry_delay).await;
                 return;
             }
         }
 
+        self.ble_consecutive_failures.store(0, Ordering::SeqCst);
         self.notify_connected(ConnectionType::Ble);
 
         // CMD 0x13 的 mode 是传输模式（USB=3 / BLE=2），不是工作模式。
@@ -1352,6 +1439,25 @@ mod tests {
     use super::*;
 
     #[test]
+    fn permission_denial_matches_macos_iokit_signatures_only() {
+        // 真机日志原文（2026-11-08）：IOHIDDeviceSetReport / 0xE00002E2 / not permitted。
+        assert!(is_permission_denial(
+            "hidapi error: IOHIDDeviceSetReport failed: (0xE00002E2) (iokit/common) not permitted"
+        ));
+        assert!(is_permission_denial(
+            "hidapi error: IOHIDDeviceOpen failed: (0xE00002E2) not permitted"
+        ));
+        // 非权限类瞬时失败（超时 / 设备消失 / 协议错）不进入补跑。
+        assert!(!is_permission_denial(
+            "hid_read_timeout: error waiting for more data"
+        ));
+        assert!(!is_permission_denial(
+            "CMD 0x13 第 6/6 轮无有效应答: 校验不符"
+        ));
+        assert!(!is_permission_denial("设备信息响应长度不足: 12"));
+    }
+
+    #[test]
     fn explicit_usb_hid_connects_without_waiting_for_audio() {
         assert_eq!(
             decide_hid_detection(true, false),
@@ -1493,5 +1599,25 @@ mod host_binding_tests {
         ));
         manager.reset_host_binding_state();
         assert!(!manager.ble_blocked_by_other_host());
+    }
+
+    #[test]
+    fn ble_failure_retry_delay_fast_retries_first_failure_for_known_target() {
+        assert_eq!(
+            ble_post_failure_retry_delay(true, 1),
+            Duration::from_secs(1)
+        );
+        assert_eq!(
+            ble_post_failure_retry_delay(true, 2),
+            Duration::from_secs(5)
+        );
+        assert_eq!(
+            ble_post_failure_retry_delay(true, 5),
+            Duration::from_secs(5)
+        );
+        assert_eq!(
+            ble_post_failure_retry_delay(false, 1),
+            Duration::from_secs(5)
+        );
     }
 }

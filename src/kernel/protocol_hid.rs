@@ -1326,9 +1326,9 @@ impl KeyConfig {
     pub fn to_bytes(&self) -> [u8; KEY_DATA_LEN] {
         let mut data = [0u8; KEY_DATA_LEN];
 
-        for i in 0..KEY_COUNT {
+        for (i, key) in self.keys.iter().enumerate().take(KEY_COUNT) {
             let offset = i * 3;
-            let bytes = self.keys[i].to_bytes();
+            let bytes = key.to_bytes();
             data[offset] = bytes[0];
             data[offset + 1] = bytes[1];
             data[offset + 2] = bytes[2];
@@ -1361,8 +1361,8 @@ impl KeyConfig {
 
     /// 清理未使用的按键（索引12-19）为 00 00 00
     pub fn clear_unused_keys(&mut self) {
-        for i in ACTIVE_KEY_COUNT..KEY_COUNT {
-            self.keys[i] = KeyInfo::new(0x00, 0x00, 0x00);
+        for key in self.keys.iter_mut().take(KEY_COUNT).skip(ACTIVE_KEY_COUNT) {
+            *key = KeyInfo::new(0x00, 0x00, 0x00);
         }
     }
 }
@@ -1381,9 +1381,9 @@ impl Default for KeyConfig {
         let mut config = Self::new();
 
         // 设置默认配置
-        for i in 0..ACTIVE_KEY_COUNT {
+        for (i, key) in config.keys.iter_mut().enumerate().take(ACTIVE_KEY_COUNT) {
             let default_value = get_default_key_value(i);
-            config.keys[i] = KeyInfo::new(
+            *key = KeyInfo::new(
                 KeyClass::Media as u8,
                 (default_value & 0xFF) as u8,
                 ((default_value >> 8) & 0xFF) as u8,
@@ -1391,8 +1391,13 @@ impl Default for KeyConfig {
         }
 
         // 未使用的按键填充 00 00 00
-        for i in ACTIVE_KEY_COUNT..KEY_COUNT {
-            config.keys[i] = KeyInfo::new(0x00, 0x00, 0x00);
+        for key in config
+            .keys
+            .iter_mut()
+            .take(KEY_COUNT)
+            .skip(ACTIVE_KEY_COUNT)
+        {
+            *key = KeyInfo::new(0x00, 0x00, 0x00);
         }
 
         config
@@ -1763,5 +1768,57 @@ mod tests {
             parse_host_result_gatt_response(CMD_AI_HOST_IDENTITY, &[0x74, 1]),
             None
         );
+    }
+
+    #[test]
+    fn audio_capabilities_response_parses_ble_gatt_flow_v1_flag() {
+        // v1.75 legacy: bits = 0x1F, default_ttl = 5000 (0x1388), max_ttl = 10000 (0x2710)
+        let legacy_hid = [
+            REPORT_ID_INPUT,
+            CMD_AI_GET_AUDIO_CAPABILITIES,
+            13,
+            0,
+            1,
+            0x1F,
+            0x00,
+            0x00,
+            0x00,
+            1,
+            60,
+            60,
+            0x88,
+            0x13,
+            0x10,
+            0x27,
+        ];
+        let legacy = parse_audio_capabilities_hid_response(&legacy_hid).expect("legacy hid");
+        assert!(!legacy.ble_gatt_flow_v1);
+        assert!(legacy.host_binding_v1);
+        assert_eq!(legacy.default_ttl_ms, 5_000);
+        assert_eq!(legacy.max_ttl_ms, 10_000);
+
+        // v1.78+: bits = 0x3F (bit 5 = AUDIO_CAP_BLE_GATT_FLOW_V1), default_ttl = 15000 (0x3A98), max_ttl = 30000 (0x7530)
+        let upgraded_gatt = [
+            CMD_AI_GET_AUDIO_CAPABILITIES,
+            13,
+            0,
+            1,
+            0x3F,
+            0x00,
+            0x00,
+            0x00,
+            1,
+            60,
+            60,
+            0x98,
+            0x3A,
+            0x30,
+            0x75,
+        ];
+        let upgraded = parse_audio_capabilities_gatt_response(&upgraded_gatt).expect("v1.78 gatt");
+        assert!(upgraded.ble_gatt_flow_v1);
+        assert!(upgraded.host_binding_v1);
+        assert_eq!(upgraded.default_ttl_ms, 15_000);
+        assert_eq!(upgraded.max_ttl_ms, 30_000);
     }
 }

@@ -31,7 +31,10 @@ use crate::kernel::event::{
 use crate::kernel::protocol_hid::*;
 use crate::kernel::sink::{AudioFrameSink, CountingSink, PcmAudioFrameAdapter, PcmSink};
 use crate::kernel::types::ConnectionType;
-use crate::runtime::hotplug::{spawn_blocking_with_runloop, HotplugConfig, HotplugManager};
+use crate::runtime::hotplug::{
+    is_permission_denial, spawn_blocking_with_runloop, HotplugConfig, HotplugManager,
+    PERMISSION_SELF_HEAL_RETRIES,
+};
 use crate::tool::parse::{parse_device_info_from_buf, parse_device_info_from_gatt};
 
 #[cfg(feature = "usb")]
@@ -342,9 +345,26 @@ impl BoardDeviceCore {
                     // USB 连接就绪后 best-effort 查一次工作模式：
                     // monitor_paused/config_conn 已由 on_monitor_ready 设置，
                     // 直接 spawn 一个查询任务，失败只 warn 不影响连接。
+                    // 输入监控授权对运行中进程实时生效（macOS 26 真机验证，2026-11-08）：
+                    // 启动期权限未就绪造成的失败是瞬态的，权限拒绝类失败有界补跑
+                    // （每 5s × PERMISSION_SELF_HEAL_RETRIES），其余失败维持一次即止。
                     let inner = inner.clone();
                     tokio::spawn(async move {
-                        match inner.get_work_mode().await {
+                        let mut attempts = 0usize;
+                        let work_mode = loop {
+                            match inner.get_work_mode().await {
+                                Ok(mode) => break Ok(mode),
+                                Err(e) if attempts < PERMISSION_SELF_HEAL_RETRIES
+                                    && is_permission_denial(&format!("{e}")) =>
+                                {
+                                    attempts += 1;
+                                    log::info!(target: "board", "[work-mode] USB 输入监控未授权，5s 后补跑（{attempts}/{PERMISSION_SELF_HEAL_RETRIES}）");
+                                    tokio::time::sleep(Duration::from_secs(5)).await;
+                                }
+                                Err(e) => break Err(e),
+                            }
+                        };
+                        match work_mode {
                             Ok(mode) => {
                                 log::info!(target: "board", "[work-mode] USB 初始工作模式: {:?}", mode);
                                 let _ = inner.event_tx.send(BoardEvent::ModeChange(ModeChangeEvent {
@@ -357,15 +377,46 @@ impl BoardDeviceCore {
                                 log::warn!(target: "board", "[work-mode] USB 查询初始工作模式失败: {}", e);
                             }
                         }
-                        // 自动上报 App 上线（best-effort，失败只 warn）
-                        if let Err(e) = inner.notify_app_online(true).await {
-                            log::warn!(target: "board", "[app-online] USB 自动上报上线失败: {}", e);
+                        // 自动上报 App 上线（best-effort，失败只 warn）；权限拒绝类同款补跑。
+                        let mut attempts = 0usize;
+                        loop {
+                            match inner.notify_app_online(true).await {
+                                Ok(()) => break,
+                                Err(e) if attempts < PERMISSION_SELF_HEAL_RETRIES
+                                    && is_permission_denial(&format!("{e}")) =>
+                                {
+                                    attempts += 1;
+                                    log::info!(target: "board", "[app-online] USB 输入监控未授权，5s 后补跑（{attempts}/{PERMISSION_SELF_HEAL_RETRIES}）");
+                                    tokio::time::sleep(Duration::from_secs(5)).await;
+                                }
+                                Err(e) => {
+                                    log::warn!(target: "board", "[app-online] USB 自动上报上线失败: {}", e);
+                                    break;
+                                }
+                            }
                         }
                         // BLE 主机绑定（固件 #13）：插 USB 即绑定本机（唯一换主人入口）。
                         // token 未注入或固件不支持（能力位 bit4=0）时跳过，行为不变。
+                        // 权限拒绝类同款补跑（绑定幂等：set 同一 token + 回读校验）。
                         #[cfg(feature = "usb")]
-                        if let Err(e) = inner.host_bind_on_usb_connect().await {
-                            log::warn!(target: "board", "[host-bind] USB 自动绑定失败: {}", e);
+                        {
+                            let mut attempts = 0usize;
+                            loop {
+                                match inner.host_bind_on_usb_connect().await {
+                                    Ok(()) => break,
+                                    Err(e) if attempts < PERMISSION_SELF_HEAL_RETRIES
+                                        && is_permission_denial(&format!("{e}")) =>
+                                    {
+                                        attempts += 1;
+                                        log::info!(target: "board", "[host-bind] USB 输入监控未授权，5s 后补跑（{attempts}/{PERMISSION_SELF_HEAL_RETRIES}）");
+                                        tokio::time::sleep(Duration::from_secs(5)).await;
+                                    }
+                                    Err(e) => {
+                                        log::warn!(target: "board", "[host-bind] USB 自动绑定失败: {}", e);
+                                        break;
+                                    }
+                                }
+                            }
                         }
                     });
                 }
