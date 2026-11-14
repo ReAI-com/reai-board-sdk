@@ -45,6 +45,39 @@ const CCC_DESCRIPTOR_UUID: uuid::Uuid = uuid::Uuid::from_bytes([
     0x00, 0x00, 0x29, 0x02, 0x00, 0x00, 0x10, 0x00, 0x80, 0x00, 0x00, 0x80, 0x5f, 0x9b, 0x34, 0xfb,
 ]);
 
+/// `scan_for_device` 轮询间隔（总预算保持 10s，但前两轮在 400ms/1000ms 快速命中已广播设备）。
+const SCAN_POLL_DELAYS_MS: [u64; 7] = [400, 600, 1_000, 2_000, 2_000, 2_000, 2_000];
+
+/// 按 FE61 特征属性选择写入方式：
+/// - 固件 >= 1.78 宣告 `WRITE | WRITE_WITHOUT_RESPONSE`，优先用 `WithoutResponse`，
+///   避免 ATT Write Request 在 50Hz FE63 洪峰丢单个 0x13 应答后触发 CoreBluetooth 30s 断连；
+/// - 旧固件（<= 1.77）仅宣告 `WRITE`，退回 `WithResponse`（Windows WinRT 严格校验属性位）。
+fn select_cmd_write_type(properties: btleplug::api::CharPropFlags) -> WriteType {
+    if properties.contains(btleplug::api::CharPropFlags::WRITE_WITHOUT_RESPONSE) {
+        WriteType::WithoutResponse
+    } else {
+        WriteType::WithResponse
+    }
+}
+
+/// 当 `WriteWithResponse` 超时（5s 仍未收到 ATT 0x13 应答）时，CoreBluetooth / BLE ATT
+/// 事务管道实际上已经卡死（等满 30s 必触发 `0x16 ATT Transaction Timeout` 断连）。
+/// 立即标记当前 epoch 会话结束、清空本轮 pending 并唤醒等待方，省去剩余 25s 假在线空等。
+fn abort_wedged_session_on_write_timeout(
+    epoch: u64,
+    current_epoch: &AtomicU64,
+    running: &AtomicBool,
+    pending: &Mutex<HashMap<u8, PendingResponse>>,
+    closed: &tokio::sync::Notify,
+) -> bool {
+    if current_epoch.load(Ordering::SeqCst) != epoch || !running.swap(false, Ordering::SeqCst) {
+        return false;
+    }
+    pending.lock().unwrap().retain(|_, p| p.epoch != epoch);
+    closed.notify_waiters();
+    true
+}
+
 /// 判断一条扫描结果是不是要找的 Vendor GATT 设备，返回命中的设备名。
 ///
 /// 同时比对广播名（`advertisement_name`）与 `local_name`，任一命中即可：
@@ -370,8 +403,9 @@ impl VendorGattClient {
             .await
             .map_err(|e| anyhow::anyhow!("BLE 扫描启动失败: {}", e))?;
 
-        for round in 0..5 {
-            tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+        let total_rounds = SCAN_POLL_DELAYS_MS.len();
+        for (round, &delay_ms) in SCAN_POLL_DELAYS_MS.iter().enumerate() {
+            tokio::time::sleep(std::time::Duration::from_millis(delay_ms)).await;
 
             let peripherals = adapter
                 .peripherals()
@@ -396,8 +430,9 @@ impl VendorGattClient {
 
             log::debug!(
                 target: "gatt",
-                "扫描轮次 {}/5 未找到{}",
+                "扫描轮次 {}/{} 未找到{}",
                 round + 1,
+                total_rounds,
                 target.as_ref().map(|t| format!(" {}", t)).unwrap_or_default()
             );
         }
@@ -553,7 +588,8 @@ impl VendorGattClient {
 
     /// 写入命令到 Command 特征值(5s 超时)
     pub async fn send_command(&self, data: &[u8]) -> Result<()> {
-        if !self.connection_is_current(self.connection_epoch()) {
+        let epoch = self.connection_epoch();
+        if !self.connection_is_current(epoch) {
             anyhow::bail!("Vendor GATT 会话已断开");
         }
         let p = self
@@ -570,16 +606,45 @@ impl VendorGattClient {
             .ok_or_else(|| anyhow::anyhow!("GATT 特征值未发现"))?;
         let cmd_data = data.to_vec();
         let seq = self.seq.fetch_add(1, Ordering::SeqCst);
+        let write_type = select_cmd_write_type(chars.cmd.properties);
 
-        log::debug!(target: "gatt", "[GATT:{}] TX CMD=0x{:02X} len={}", seq, cmd_data[0], cmd_data.len());
-        // FE61 只有 WRITE 属性,必须用 WithResponse(Windows 严格按属性匹配)
-        tokio::time::timeout(
+        log::debug!(
+            target: "gatt",
+            "[GATT:{}] TX CMD=0x{:02X} len={} mode={:?}",
+            seq,
+            cmd_data.first().copied().unwrap_or(0),
+            cmd_data.len(),
+            write_type
+        );
+        match tokio::time::timeout(
             std::time::Duration::from_secs(5),
-            p.write(&chars.cmd, &cmd_data, WriteType::WithResponse),
+            p.write(&chars.cmd, &cmd_data, write_type),
         )
         .await
-        .map_err(|_| anyhow::anyhow!("GATT 写入超时 5s"))?
-        .map_err(|e| anyhow::anyhow!("GATT 写入失败: {}", e))
+        {
+            Ok(Ok(())) => Ok(()),
+            Ok(Err(e)) => Err(anyhow::anyhow!("GATT 写入失败: {}", e)),
+            Err(_) => {
+                if write_type == WriteType::WithResponse
+                    && abort_wedged_session_on_write_timeout(
+                        epoch,
+                        &self.connection_epoch,
+                        &self.running,
+                        &self.pending_responses,
+                        &self.connection_closed,
+                    )
+                {
+                    log::warn!(
+                        target: "gatt",
+                        "[GATT:{seq}] CMD=0x{:02X} WriteWithResponse 超时 5s，ATT 通道已卡死，主动断开触发快速重连",
+                        cmd_data.first().copied().unwrap_or(0)
+                    );
+                    let _ = tokio::time::timeout(std::time::Duration::from_secs(3), p.disconnect())
+                        .await;
+                }
+                Err(anyhow::anyhow!("GATT 写入超时 5s"))
+            }
+        }
     }
 
     pub fn set_audio_enabled(&self, enabled: bool) {
@@ -1292,6 +1357,41 @@ mod name_and_pacing_tests {
         assert_eq!(*calls.lock().unwrap(), ["connect", "disconnect", "connect"]);
         assert_eq!(start.elapsed(), std::time::Duration::from_secs(1));
     }
+
+    #[test]
+    fn cmd_write_type_uses_without_response_only_when_characteristic_advertises_it() {
+        use btleplug::api::CharPropFlags;
+
+        assert_eq!(
+            select_cmd_write_type(CharPropFlags::WRITE),
+            WriteType::WithResponse
+        );
+        assert_eq!(
+            select_cmd_write_type(CharPropFlags::WRITE | CharPropFlags::WRITE_WITHOUT_RESPONSE),
+            WriteType::WithoutResponse
+        );
+        assert_eq!(
+            select_cmd_write_type(CharPropFlags::WRITE_WITHOUT_RESPONSE),
+            WriteType::WithoutResponse
+        );
+    }
+
+    #[test]
+    fn scan_poll_delays_probe_early_while_preserving_ten_second_budget() {
+        assert!(
+            SCAN_POLL_DELAYS_MS[0] <= 500,
+            "首轮轮询应在 500ms 内完成，避免已广播设备白等 2s"
+        );
+        assert!(
+            SCAN_POLL_DELAYS_MS[0] + SCAN_POLL_DELAYS_MS[1] <= 1_000,
+            "前两轮应在 1s 内覆盖快速广播窗口"
+        );
+        assert_eq!(
+            SCAN_POLL_DELAYS_MS.iter().sum::<u64>(),
+            10_000,
+            "单次 scan_for_device 总窗口仍保持 10s"
+        );
+    }
 }
 
 #[cfg(test)]
@@ -1660,5 +1760,72 @@ mod tests {
             CCC_DESCRIPTOR_UUID.to_string(),
             "00002902-0000-1000-8000-00805f9b34fb"
         );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn write_timeout_aborts_current_session_and_wakes_waiters_without_touching_newer_epoch() {
+        let session = notification_session();
+        let (response_tx, mut response_rx) = tokio::sync::oneshot::channel();
+        session.pending.lock().unwrap().insert(
+            0x6F,
+            PendingResponse {
+                cmd: 0x6F,
+                epoch: 1,
+                tx: response_tx,
+            },
+        );
+        let closed = session.closed.notified();
+        tokio::pin!(closed);
+        closed.as_mut().enable();
+
+        assert!(abort_wedged_session_on_write_timeout(
+            1,
+            &session.current_epoch,
+            &session.running,
+            &session.pending,
+            &session.closed,
+        ));
+        assert!(!session.running.load(Ordering::SeqCst));
+        assert!(matches!(
+            response_rx.try_recv(),
+            Err(tokio::sync::oneshot::error::TryRecvError::Closed)
+        ));
+        tokio::time::timeout(std::time::Duration::ZERO, &mut closed)
+            .await
+            .expect("closed waiter should wake immediately");
+
+        // 幂等：同一卡死会话重复超时不再重复触发断开
+        assert!(!abort_wedged_session_on_write_timeout(
+            1,
+            &session.current_epoch,
+            &session.running,
+            &session.pending,
+            &session.closed,
+        ));
+
+        // 新会话已建立（epoch=2）：旧会话的迟到超时不得污染新会话
+        session.current_epoch.store(2, Ordering::SeqCst);
+        session.running.store(true, Ordering::SeqCst);
+        let (new_tx, mut new_rx) = tokio::sync::oneshot::channel();
+        session.pending.lock().unwrap().insert(
+            0x6F,
+            PendingResponse {
+                cmd: 0x6F,
+                epoch: 2,
+                tx: new_tx,
+            },
+        );
+        assert!(!abort_wedged_session_on_write_timeout(
+            1,
+            &session.current_epoch,
+            &session.running,
+            &session.pending,
+            &session.closed,
+        ));
+        assert!(session.running.load(Ordering::SeqCst));
+        assert!(matches!(
+            new_rx.try_recv(),
+            Err(tokio::sync::oneshot::error::TryRecvError::Empty)
+        ));
     }
 }

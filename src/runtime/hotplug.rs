@@ -12,6 +12,8 @@
 //! `tokio::task::spawn_blocking` 包装;BLE client 调用 `.await`。
 //! 四阶段状态机骨架与 V1 一致(实战验证过,不重构为 select!,避免引入时序 bug)。
 
+#[cfg(feature = "ble")]
+use std::sync::atomic::AtomicU32;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -44,7 +46,6 @@ use crate::runtime::usb::probe::{self, ProbeTiming};
 /// 权限未就绪造成的连接期探测/初始化失败的有界补跑次数（每 5s 一次，合计约 20 分钟）。
 /// 输入监控授权对运行中的进程实时生效（macOS 26 真机验证，2026-11-08）：用户在系统设置
 /// 里点开授权后，本进程的下一次补跑就能成功，不需要重启 App 或拔插设备。
-#[cfg(feature = "usb")]
 pub(crate) const PERMISSION_SELF_HEAL_RETRIES: usize = 240;
 
 /// macOS IOHID 的「未授权」失败特征：`IOHIDDeviceSetReport failed: (0xE00002E2)
@@ -467,6 +468,8 @@ pub struct HotplugManager {
     ble_auto_connect: Arc<AtomicBool>,
     #[cfg(feature = "ble")]
     on_ble_device_name_updated: Option<OnBleDeviceNameUpdated>,
+    #[cfg(feature = "ble")]
+    ble_consecutive_failures: AtomicU32,
     /// Windows「被系统蓝牙占用」提示是否已报过（条件消失后复位）。
     #[cfg_attr(not(all(feature = "usb", target_os = "windows")), allow(dead_code))]
     system_bluetooth_reported: AtomicBool,
@@ -485,6 +488,17 @@ fn ble_disconnect_reason(reason: Option<u8>) -> DisconnectReason {
         DisconnectReason::DeviceDisconnect
     } else {
         DisconnectReason::DeviceGone
+    }
+}
+
+/// 已知 BLE 目标断连后的首轮失败（例如旧固件刚断开前 2.5s 处于定向广播窗口）用 1s 快速重扫，
+/// 连续失败第 2 次起退回 5s，兼顾快速回连与设备离线时的后台功耗。
+#[cfg(feature = "ble")]
+fn ble_post_failure_retry_delay(has_target: bool, consecutive_failures: u32) -> Duration {
+    if has_target && consecutive_failures <= 1 {
+        Duration::from_secs(1)
+    } else {
+        Duration::from_secs(5)
     }
 }
 
@@ -508,6 +522,8 @@ impl HotplugManager {
             ble_auto_connect: Arc::new(AtomicBool::new(true)),
             #[cfg(feature = "ble")]
             on_ble_device_name_updated: None,
+            #[cfg(feature = "ble")]
+            ble_consecutive_failures: AtomicU32::new(0),
             system_bluetooth_reported: AtomicBool::new(false),
             host_token: Arc::new(Mutex::new(None)),
             ble_bound_by_other: Arc::new(AtomicBool::new(false)),
@@ -619,6 +635,7 @@ impl HotplugManager {
     #[cfg(feature = "ble")]
     pub fn set_ble_target(&self, name: Option<&str>) {
         *self.ble_last_device_name.lock().unwrap() = name.map(|s| s.to_string());
+        self.ble_consecutive_failures.store(0, Ordering::SeqCst);
     }
 
     pub fn stop(&self) {
@@ -1087,7 +1104,9 @@ impl HotplugManager {
                         self.emit_error(format!("BLE 扫描未发现设备: {e}"), true);
                     }
                 }
-                tokio::time::sleep(Duration::from_secs(5)).await;
+                let failures = self.ble_consecutive_failures.fetch_add(1, Ordering::SeqCst) + 1;
+                let retry_delay = ble_post_failure_retry_delay(target.is_some(), failures);
+                tokio::time::sleep(retry_delay).await;
                 return;
             }
         };
@@ -1124,9 +1143,16 @@ impl HotplugManager {
             }
         };
         if let Err(e) = client.connect_with_retry(&peripheral, &still_wanted).await {
-            log::warn!(target: "hotplug", "BLE 连接失败: {},5s 后重试", e);
+            let failures = self.ble_consecutive_failures.fetch_add(1, Ordering::SeqCst) + 1;
+            let retry_delay = ble_post_failure_retry_delay(true, failures);
+            log::warn!(
+                target: "hotplug",
+                "BLE 连接失败: {},{}s 后重试",
+                e,
+                retry_delay.as_secs()
+            );
             self.emit_error(format!("BLE 连接失败: {e}"), true);
-            tokio::time::sleep(Duration::from_secs(5)).await;
+            tokio::time::sleep(retry_delay).await;
             return;
         }
 
@@ -1139,10 +1165,12 @@ impl HotplugManager {
         // Receive Event notifications before identity; bound 1.75 rejects 6E
         // until 74 succeeds. Audio subscription follows admission, not before it.
         if let Err(error) = client.start_notification_loop().await {
+            let failures = self.ble_consecutive_failures.fetch_add(1, Ordering::SeqCst) + 1;
+            let retry_delay = ble_post_failure_retry_delay(true, failures);
             log::warn!(target: "hotplug", "BLE 通知监听启动失败: {}", error);
             let _ = client.disconnect().await;
             self.emit_error(format!("BLE 通知监听启动失败: {error}"), true);
-            tokio::time::sleep(Duration::from_secs(5)).await;
+            tokio::time::sleep(retry_delay).await;
             return;
         }
         let epoch = client.connection_epoch();
@@ -1176,6 +1204,8 @@ impl HotplugManager {
                 return;
             }
             Err(error) => {
+                let failures = self.ble_consecutive_failures.fetch_add(1, Ordering::SeqCst) + 1;
+                let retry_delay = ble_post_failure_retry_delay(true, failures);
                 let reason = client.device_disconnect_reason(epoch);
                 let _ = client.disconnect().await;
                 self.notify_disconnected(ble_disconnect_reason(reason));
@@ -1185,11 +1215,12 @@ impl HotplugManager {
                 };
                 log::warn!(target: "hotplug", "{}", message);
                 self.emit_error(message.to_string(), true);
-                tokio::time::sleep(Duration::from_secs(5)).await;
+                tokio::time::sleep(retry_delay).await;
                 return;
             }
         }
 
+        self.ble_consecutive_failures.store(0, Ordering::SeqCst);
         self.notify_connected(ConnectionType::Ble);
 
         // CMD 0x13 的 mode 是传输模式（USB=3 / BLE=2），不是工作模式。
@@ -1568,5 +1599,25 @@ mod host_binding_tests {
         ));
         manager.reset_host_binding_state();
         assert!(!manager.ble_blocked_by_other_host());
+    }
+
+    #[test]
+    fn ble_failure_retry_delay_fast_retries_first_failure_for_known_target() {
+        assert_eq!(
+            ble_post_failure_retry_delay(true, 1),
+            Duration::from_secs(1)
+        );
+        assert_eq!(
+            ble_post_failure_retry_delay(true, 2),
+            Duration::from_secs(5)
+        );
+        assert_eq!(
+            ble_post_failure_retry_delay(true, 5),
+            Duration::from_secs(5)
+        );
+        assert_eq!(
+            ble_post_failure_retry_delay(false, 1),
+            Duration::from_secs(5)
+        );
     }
 }

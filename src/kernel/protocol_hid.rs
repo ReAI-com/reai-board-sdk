@@ -1764,4 +1764,56 @@ mod tests {
             None
         );
     }
+
+    #[test]
+    fn audio_capabilities_response_parses_ble_gatt_flow_v1_flag() {
+        // v1.75 legacy: bits = 0x1F, default_ttl = 5000 (0x1388), max_ttl = 10000 (0x2710)
+        let legacy_hid = [
+            REPORT_ID_INPUT,
+            CMD_AI_GET_AUDIO_CAPABILITIES,
+            13,
+            0,
+            1,
+            0x1F,
+            0x00,
+            0x00,
+            0x00,
+            1,
+            60,
+            60,
+            0x88,
+            0x13,
+            0x10,
+            0x27,
+        ];
+        let legacy = parse_audio_capabilities_hid_response(&legacy_hid).expect("legacy hid");
+        assert!(!legacy.ble_gatt_flow_v1);
+        assert!(legacy.host_binding_v1);
+        assert_eq!(legacy.default_ttl_ms, 5_000);
+        assert_eq!(legacy.max_ttl_ms, 10_000);
+
+        // v1.78+: bits = 0x3F (bit 5 = AUDIO_CAP_BLE_GATT_FLOW_V1), default_ttl = 15000 (0x3A98), max_ttl = 30000 (0x7530)
+        let upgraded_gatt = [
+            CMD_AI_GET_AUDIO_CAPABILITIES,
+            13,
+            0,
+            1,
+            0x3F,
+            0x00,
+            0x00,
+            0x00,
+            1,
+            60,
+            60,
+            0x98,
+            0x3A,
+            0x30,
+            0x75,
+        ];
+        let upgraded = parse_audio_capabilities_gatt_response(&upgraded_gatt).expect("v1.78 gatt");
+        assert!(upgraded.ble_gatt_flow_v1);
+        assert!(upgraded.host_binding_v1);
+        assert_eq!(upgraded.default_ttl_ms, 15_000);
+        assert_eq!(upgraded.max_ttl_ms, 30_000);
+    }
 }
