@@ -70,10 +70,22 @@ fn abort_wedged_session_on_write_timeout(
     pending: &Mutex<HashMap<u8, PendingResponse>>,
     closed: &tokio::sync::Notify,
 ) -> bool {
-    if current_epoch.load(Ordering::SeqCst) != epoch || !running.swap(false, Ordering::SeqCst) {
-        return false;
+    {
+        let mut guard = pending.lock().unwrap();
+        if current_epoch
+            .compare_exchange(
+                epoch,
+                epoch.wrapping_add(1),
+                Ordering::SeqCst,
+                Ordering::SeqCst,
+            )
+            .is_err()
+            || !running.swap(false, Ordering::SeqCst)
+        {
+            return false;
+        }
+        guard.retain(|_, p| p.epoch != epoch);
     }
-    pending.lock().unwrap().retain(|_, p| p.epoch != epoch);
     closed.notify_waiters();
     true
 }
@@ -554,13 +566,18 @@ impl VendorGattClient {
             )),
         }?;
 
-        self.connection_epoch.fetch_add(1, Ordering::SeqCst);
-        self.connection_closed.notify_waiters();
         *self.peripheral.lock().unwrap() = Some(peripheral.clone());
         *self.chars.lock().unwrap() = Some(found_chars);
-        // 新连接清掉上一连接可能残留的 0x60 主动断开标志
-        self.device_disconnect_reason.store(0, Ordering::SeqCst);
-        self.running.store(true, Ordering::SeqCst);
+        {
+            // 与 `abort_wedged_session_on_write_timeout` 共用 `pending_responses` 临界区，
+            // 保证旧会话超时中止与新会话激活（推进 epoch + 置 running=true）严格串行。
+            let _session_guard = self.pending_responses.lock().unwrap();
+            self.connection_epoch.fetch_add(1, Ordering::SeqCst);
+            // 新连接清掉上一连接可能残留的 0x60 主动断开标志
+            self.device_disconnect_reason.store(0, Ordering::SeqCst);
+            self.running.store(true, Ordering::SeqCst);
+        }
+        self.connection_closed.notify_waiters();
 
         Ok(())
     }
@@ -1827,5 +1844,57 @@ mod tests {
             new_rx.try_recv(),
             Err(tokio::sync::oneshot::error::TryRecvError::Empty)
         ));
+    }
+
+    #[tokio::test]
+    async fn abort_wedged_session_cas_advances_epoch_and_never_clobbers_concurrent_reconnect() {
+        let session = std::sync::Arc::new(notification_session());
+        session.current_epoch.store(5, Ordering::SeqCst);
+        session.running.store(true, Ordering::SeqCst);
+
+        // 1) 成功中止卡死会话时必须原子推进 current_epoch（compare_exchange 一锤定音），
+        //    使任何同一代次迟到路径立即识别旧代次已作废。
+        assert!(abort_wedged_session_on_write_timeout(
+            5,
+            &session.current_epoch,
+            &session.running,
+            &session.pending,
+            &session.closed,
+        ));
+        assert_eq!(
+            session.current_epoch.load(Ordering::SeqCst),
+            6,
+            "abort 必须通过 compare_exchange 原子推进 epoch"
+        );
+        assert!(!session.running.load(Ordering::SeqCst));
+
+        // 2) 若重连临界区正在持 pending 锁切换新会话，并发到达的旧超时必须等锁后看到新 epoch，
+        //    绝不能把新会话刚置上的 running=true 误翻回 false。
+        let barrier = std::sync::Arc::new(std::sync::Barrier::new(2));
+        let session_for_abort = session.clone();
+        let barrier_for_abort = barrier.clone();
+        let guard = session.pending.lock().unwrap();
+        let handle = std::thread::spawn(move || {
+            barrier_for_abort.wait();
+            abort_wedged_session_on_write_timeout(
+                6,
+                &session_for_abort.current_epoch,
+                &session_for_abort.running,
+                &session_for_abort.pending,
+                &session_for_abort.closed,
+            )
+        });
+        barrier.wait();
+        // 模拟 connect() 在同一把锁内推进 epoch 并激活新会话
+        session.current_epoch.fetch_add(1, Ordering::SeqCst);
+        session.running.store(true, Ordering::SeqCst);
+        drop(guard);
+
+        let aborted_stale = handle.join().unwrap();
+        assert!(!aborted_stale, "旧 epoch 超时在重连完成后不得命中");
+        assert!(
+            session.running.load(Ordering::SeqCst),
+            "新会话的 running=true 不得被并发旧超时覆盖"
+        );
     }
 }
