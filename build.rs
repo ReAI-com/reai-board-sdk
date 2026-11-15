@@ -21,6 +21,9 @@ fn main() {
     }
 
     println!("cargo:rerun-if-changed=virtual-mic");
+    println!("cargo:rerun-if-changed=virtual-mic/driver/CMakeLists.txt");
+    println!("cargo:rerun-if-changed=virtual-mic/driver/Driver.cpp");
+    println!("cargo:rerun-if-changed=virtual-mic/driver/Info.plist.in");
     println!("cargo:rerun-if-env-changed=REAI_VIRTUAL_MIC_CODESIGN_ID");
 
     let manifest_dir = PathBuf::from(env::var("CARGO_MANIFEST_DIR").unwrap());

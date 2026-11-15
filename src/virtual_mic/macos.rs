@@ -56,7 +56,8 @@
 //! - 音质上限为 16 kHz 单声道(BLE mSBC 的带宽决定),系统按需自动做采样率
 //!   转换;设备原生就是 16k,本模块不做重采样。
 //! - 没有数据泵入时设备呈现静音;BLE 断开重连无需重新安装驱动。
-//! - 驱动声明了 `CanBeDefault=false`,不会被系统选为默认输入设备。
+//! - 驱动声明了 `CanBeDefault=true`（否则系统设置输入列表会隐藏它）及 USB
+//!   传输类型（否则 Chromium / Electron 输入设备列表在非系统默认输入时会过滤虚拟设备）。
 
 use std::net::UdpSocket;
 use std::path::{Path, PathBuf};
@@ -181,5 +182,39 @@ impl PcmSink for VirtualMic {
             payload.extend_from_slice(&value.to_le_bytes());
         }
         let _ = self.socket.send(&payload);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn bundled_hal_driver_is_v020_and_reports_usb_transport_override() {
+        let bundle = bundled_driver_path();
+        let plist_path = bundle.join("Contents/Info.plist");
+        let plist = std::fs::read_to_string(&plist_path)
+            .unwrap_or_else(|e| panic!("failed to read {}: {e}", plist_path.display()));
+        assert!(
+            plist.contains("<key>CFBundleShortVersionString</key>")
+                && plist.contains("<string>0.2.0</string>"),
+            "expected bundled ReAIVibeBoard.driver Info.plist to stamp version 0.2.0, got:\n{plist}"
+        );
+
+        let bin_path = bundle.join("Contents/MacOS/ReAIVibeBoard");
+        let nm_out = Command::new("nm")
+            .arg(&bin_path)
+            .output()
+            .expect("failed to run nm on ReAIVibeBoard binary");
+        assert!(
+            nm_out.status.success(),
+            "nm failed on {}",
+            bin_path.display()
+        );
+        let symbols = String::from_utf8_lossy(&nm_out.stdout);
+        assert!(
+            symbols.contains("MicDevice") && symbols.contains("GetTransportType"),
+            "expected ReAIVibeBoard binary to contain MicDevice::GetTransportType override so Chromium/Electron enumerate it without requiring system default input"
+        );
     }
 }

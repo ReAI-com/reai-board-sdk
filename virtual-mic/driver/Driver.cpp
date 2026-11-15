@@ -16,6 +16,7 @@
 #include <aspl/Stream.hpp>
 #include <aspl/Tracer.hpp>
 
+#include <CoreAudio/AudioHardwareBase.h>
 #include <CoreAudio/AudioServerPlugIn.h>
 
 #include <arpa/inet.h>
@@ -169,6 +170,21 @@ private:
     std::shared_ptr<SampleRing> ring_;
 };
 
+// Reports USB transport instead of kAudioDeviceTransportTypeVirtual so
+// Chromium / Electron / WebRTC apps (Typeless, Wispr Flow, Chrome, etc.)
+// enumerate "ReAI-Vibe-Board" in their microphone pickers even when it is not
+// selected as the macOS system default input device.
+class MicDevice : public aspl::Device
+{
+public:
+    using aspl::Device::Device;
+
+    UInt32 GetTransportType() const override
+    {
+        return kAudioDeviceTransportTypeUSB;
+    }
+};
+
 std::shared_ptr<aspl::Driver> CreateDriver()
 {
     auto context = std::make_shared<aspl::Context>();
@@ -187,7 +203,7 @@ std::shared_ptr<aspl::Driver> CreateDriver()
     params.CanBeDefault = true;
     params.CanBeDefaultForSystemSounds = true;
 
-    auto device = std::make_shared<aspl::Device>(context, params);
+    auto device = std::make_shared<MicDevice>(context, params);
     device->AddStreamWithControlsAsync(aspl::Direction::Input);
 
     auto ring = std::make_shared<SampleRing>();
