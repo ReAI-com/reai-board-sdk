@@ -470,6 +470,9 @@ pub struct HotplugManager {
     on_ble_device_name_updated: Option<OnBleDeviceNameUpdated>,
     #[cfg(feature = "ble")]
     ble_consecutive_failures: AtomicU32,
+    /// 最近一次 USB 会话结束的时刻（拔线切蓝牙的回连宽限判定用）。
+    #[cfg(feature = "ble")]
+    usb_session_ended_at: Mutex<Option<std::time::Instant>>,
     /// Windows「被系统蓝牙占用」提示是否已报过（条件消失后复位）。
     #[cfg_attr(not(all(feature = "usb", target_os = "windows")), allow(dead_code))]
     system_bluetooth_reported: AtomicBool,
@@ -502,6 +505,30 @@ fn ble_post_failure_retry_delay(has_target: bool, consecutive_failures: u32) -> 
     }
 }
 
+/// USB 会话结束后、BLE 自动回连启动前的宽限。Windows 上旧固件（<=1.77）拔线后约 2.5s
+/// 只发**定向广播**（仅面向旧主机），此时发起连接必然快速失败（btleplug/WinRT 报
+/// `Not connected`），随后的连续重试还容易把 WinRT 服务发现楔死成 20s×3 全超时
+/// （2026-11-16 Windows 1.0.11 现场回归：首连 3.5s 快败 → 之后 5 分钟全部 20s 挂死）。
+/// 先等过定向窗口再首连；非 Windows 保持立即回连（macOS 已验证行为，宽限为 0）。
+#[cfg(feature = "ble")]
+#[cfg(target_os = "windows")]
+const BLE_RECONNECT_GRACE_AFTER_USB: Duration = Duration::from_secs(3);
+#[cfg(feature = "ble")]
+#[cfg(not(target_os = "windows"))]
+const BLE_RECONNECT_GRACE_AFTER_USB: Duration = Duration::ZERO;
+
+/// 宽限判定（纯函数便于测试）：`ended_at` 为最近一次 USB 会话结束时刻。
+#[cfg(feature = "ble")]
+fn ble_reconnect_grace_elapsed(
+    ended_at: Option<std::time::Instant>,
+    now: std::time::Instant,
+) -> bool {
+    match ended_at {
+        Some(t) => now.duration_since(t) >= BLE_RECONNECT_GRACE_AFTER_USB,
+        None => true,
+    }
+}
+
 impl HotplugManager {
     pub fn new(event_tx: broadcast::Sender<BoardEvent>, config: HotplugConfig) -> Self {
         Self {
@@ -524,6 +551,8 @@ impl HotplugManager {
             on_ble_device_name_updated: None,
             #[cfg(feature = "ble")]
             ble_consecutive_failures: AtomicU32::new(0),
+            #[cfg(feature = "ble")]
+            usb_session_ended_at: Mutex::new(None),
             system_bluetooth_reported: AtomicBool::new(false),
             host_token: Arc::new(Mutex::new(None)),
             ble_bound_by_other: Arc::new(AtomicBool::new(false)),
@@ -677,7 +706,10 @@ impl HotplugManager {
 
             match conn_type {
                 #[cfg(feature = "usb")]
-                ConnectionType::Usb => self.run_usb_session().await,
+                ConnectionType::Usb => {
+                    self.run_usb_session().await;
+                    self.note_usb_session_ended();
+                }
                 #[cfg(not(feature = "usb"))]
                 ConnectionType::Usb => {
                     log::warn!(target: "hotplug", "检测到 USB 连接但 usb feature 未启用,跳过");
@@ -725,8 +757,14 @@ impl HotplugManager {
             // 避免多台设备环境下误连任意一个 REAI_VB_ 设备。
             // vendor_gatt_client 不在这里检查——它由 run_ble_session 通过 ensure 回调
             // 延迟创建（方案 B），此处只看「用户是否要 BLE」（auto_connect + target）。
+            // 拔线切换后先过回连宽限（见 BLE_RECONNECT_GRACE_AFTER_USB）再启动；
+            // 宽限期内 USB 回插在上一优先级自然胜出，不影响 USB 抢占检测。
             let has_target = self.ble_last_device_name.lock().unwrap().is_some();
-            if has_target && self.ble_auto_connect.load(Ordering::SeqCst) {
+            let grace_ok = ble_reconnect_grace_elapsed(
+                *self.usb_session_ended_at.lock().unwrap(),
+                std::time::Instant::now(),
+            );
+            if has_target && grace_ok && self.ble_auto_connect.load(Ordering::SeqCst) {
                 return Some(ConnectionType::Ble);
             }
         }
@@ -989,6 +1027,22 @@ impl HotplugManager {
         monitor.stop();
         log::info!(target: "hid", "USB 设备已断开: {:?}", reason);
         self.notify_disconnected(reason);
+    }
+
+    /// 记录 USB 会话结束时刻，供 [`Self::detect_connection`] 的 BLE 回连宽限判定。
+    /// 拔线后固件先进入定向广播窗口（见 [`BLE_RECONNECT_GRACE_AFTER_USB`]），
+    /// Windows 上立即首连必失败且易楔死 WinRT，故等过窗口再回连。
+    #[cfg(feature = "ble")]
+    fn note_usb_session_ended(&self) {
+        let grace = BLE_RECONNECT_GRACE_AFTER_USB;
+        *self.usb_session_ended_at.lock().unwrap() = Some(std::time::Instant::now());
+        if !grace.is_zero() {
+            log::info!(
+                target: "hotplug",
+                "USB 会话结束，{:?} 后启动 BLE 自动回连（避开定向广播窗口）",
+                grace
+            );
+        }
     }
 
     /// 探测成功的收口：设 BLE 回连目标并广播设备信息（补跑与首次探测共用同一条路径）。
@@ -1437,6 +1491,24 @@ impl HotplugManager {
 #[cfg(all(test, feature = "usb"))]
 mod tests {
     use super::*;
+
+    #[cfg(feature = "ble")]
+    #[test]
+    fn ble_reconnect_grace_matches_platform_semantics() {
+        let now = std::time::Instant::now();
+        // 冷启动（从未有过 USB 会话）：不设宽限，立即允许回连。
+        assert!(ble_reconnect_grace_elapsed(None, now));
+        // USB 会话刚结束 100ms：是否放行取决于平台宽限（Windows 3s 拦下，非 Windows 为 0 放行）。
+        let just_ended = now - Duration::from_millis(100);
+        assert_eq!(
+            ble_reconnect_grace_elapsed(Some(just_ended), now),
+            BLE_RECONNECT_GRACE_AFTER_USB <= Duration::from_millis(100),
+            "宽限期内应按平台常量拦截"
+        );
+        // 宽限已过：放行。
+        let long_past = now - (BLE_RECONNECT_GRACE_AFTER_USB + Duration::from_secs(1));
+        assert!(ble_reconnect_grace_elapsed(Some(long_past), now));
+    }
 
     #[test]
     fn permission_denial_matches_macos_iokit_signatures_only() {
