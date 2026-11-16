@@ -161,6 +161,14 @@ impl BleConnectPacing {
     }
 }
 
+/// 「连接阶段整体超时」类失败的特征（[`VendorGattClient::connect`] 里构造的文案）。
+/// 这类失败说明 GATT/服务发现已经楔死，同一会话对象上立即重试只会继续超时
+/// （2026-11-16 Windows 实测：超时后第 2、3 次尝试全部再超时，还加重 WinRT 楔死）。
+/// 据此提前结束本轮、交回 hotplug 换全新会话对象再试。
+fn is_connect_stage_timeout(error: &anyhow::Error) -> bool {
+    error.to_string().starts_with("BLE connect 超时")
+}
+
 async fn connect_with_pacing<C, CF, D, DF>(
     pacing: BleConnectPacing,
     still_wanted: &(dyn Fn() -> bool + Send + Sync),
@@ -187,6 +195,16 @@ where
                 // 包括最后一次失败：已连接但发现/订阅失败的设备可能不再广播，
                 // 不清理便交回扫描会让后续自动重连一直找不到它。
                 let _ = tokio::time::timeout(std::time::Duration::from_secs(3), disconnect()).await;
+                if is_connect_stage_timeout(&error) {
+                    log::warn!(
+                        target: "gatt",
+                        "BLE 连接第 {}/{} 次失败: {}（连接阶段超时，本轮不再重试，换新会话对象）",
+                        attempt,
+                        pacing.attempts,
+                        error
+                    );
+                    return Err(error);
+                }
                 if attempt >= pacing.attempts {
                     return Err(error);
                 }
@@ -404,8 +422,14 @@ impl VendorGattClient {
 
     /// 扫描发现 Vendor GATT 设备,返回 (Peripheral, 设备名)。
     ///
-    /// 传 target_name 精确匹配;否则匹配 REAI_VB_ 前缀。5 轮 × 2s。
-    pub async fn scan_for_device(&self, target_name: Option<&str>) -> Result<(Peripheral, String)> {
+    /// 传 target_name 精确匹配;否则匹配 REAI_VB_ 前缀。轮询节奏见 [`SCAN_POLL_DELAYS_MS`]。
+    /// `should_abort` 在每个轮询间隙被调用，返回 true 时中止扫描（Windows 上用于
+    /// USB 抢占：整轮 10s 扫描期间插入的 USB 不能等到轮末才被看见，2026-11-16）。
+    pub async fn scan_for_device(
+        &self,
+        target_name: Option<&str>,
+        should_abort: Option<&(dyn Fn() -> bool + Send + Sync)>,
+    ) -> Result<(Peripheral, String)> {
         let adapter = self.adapter.clone();
         let target = target_name.map(|s| s.to_string());
 
@@ -418,6 +442,15 @@ impl VendorGattClient {
         let total_rounds = SCAN_POLL_DELAYS_MS.len();
         for (round, &delay_ms) in SCAN_POLL_DELAYS_MS.iter().enumerate() {
             tokio::time::sleep(std::time::Duration::from_millis(delay_ms)).await;
+            if let Some(abort) = should_abort {
+                if abort() {
+                    if let Err(e) = adapter.stop_scan().await {
+                        log::warn!(target: "gatt", "stop_scan 失败(可能仍占用适配器): {}", e);
+                    }
+                    log::info!(target: "gatt", "BLE 扫描被抢占中止（优先级更高的连接已出现）");
+                    return Err(anyhow::anyhow!("BLE 扫描被抢占中止"));
+                }
+            }
 
             let peripherals = adapter
                 .peripherals()
@@ -1321,6 +1354,40 @@ mod name_and_pacing_tests {
         .unwrap_err();
         assert_eq!(error.to_string(), "service discovery timed out");
         assert_eq!(*calls.lock().unwrap(), ["connect", "disconnect"]);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn connect_stage_timeout_skips_remaining_attempts() {
+        // 连接阶段整体超时（GATT/服务发现已楔死）：同一对象立即重试只会继续超时，
+        // 应当直接结束本轮（2026-11-16 Windows 实测），留给 hotplug 换新会话对象。
+        let calls = Mutex::new(Vec::new());
+        let pacing = BleConnectPacing {
+            pre_connect_delay: std::time::Duration::ZERO,
+            attempts: 3,
+            first_backoff: std::time::Duration::from_secs(1),
+            ..BleConnectPacing::current()
+        };
+        let error = connect_with_pacing(
+            pacing,
+            &|| true,
+            || async {
+                calls.lock().unwrap().push("connect");
+                Err(anyhow::anyhow!(
+                    "BLE connect 超时(20s)— 可能 CoreBluetooth Event receiver died 或 WinRT 服务发现卡住,将重试"
+                ))
+            },
+            || async {
+                calls.lock().unwrap().push("disconnect");
+            },
+        )
+        .await
+        .unwrap_err();
+        assert!(is_connect_stage_timeout(&error));
+        assert_eq!(*calls.lock().unwrap(), ["connect", "disconnect"]);
+        // 非超时类失败不受影响，仍按 attempts 退避重试（沿用既有语义）。
+        assert!(!is_connect_stage_timeout(&anyhow::anyhow!(
+            "Vendor GATT 连接失败: Not connected"
+        )));
     }
 
     #[tokio::test(start_paused = true)]

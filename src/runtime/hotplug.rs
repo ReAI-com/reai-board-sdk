@@ -875,6 +875,37 @@ impl HotplugManager {
         ble_preemption_from_hid(decision)
     }
 
+    /// BLE 重连（扫描/连接尝试间隙）用的同步 USB 抢占判定。
+    ///
+    /// Windows 实测（2026-11-16）：单线程热插拔状态机会被整轮 BLE 回连
+    /// （扫描 ≤10s + 连接尝试 20s×N）占住，期间插入的 USB 要等整轮结束才被
+    /// 看见（最坏 ~70s），而硬件指示灯早已亮起——在每个间隙做一次轻量 HID
+    /// 枚举（复用 [`Self::check_usb_preemption`]，不碰音频），把 USB 识别压回秒级。
+    /// 仅 Windows 需要：macOS 的 CoreBluetooth 路径没有这个阻塞形态，且所有
+    /// HID 操作必须留在专用 RunLoop 线程，保持原行为。
+    #[cfg(all(feature = "ble", feature = "usb", target_os = "windows"))]
+    fn usb_preempting_now() -> bool {
+        matches!(Self::check_usb_preemption(), BlePreemptionCheck::Preempt)
+    }
+    #[cfg(all(feature = "ble", not(all(feature = "usb", target_os = "windows"))))]
+    fn usb_preempting_now() -> bool {
+        false
+    }
+
+    /// 退役当前 BLE 客户端（清空共享槽，释放 btleplug Peripheral / WinRT 设备对象）。
+    ///
+    /// Windows 实测（2026-11-16）：会话中途 ATT 卡死（写超时）后，复用同一客户端
+    /// 重连会出现「服务发现 0 特征值」甚至把后续轮次全部楔死；每轮失败后退役、
+    /// 下一轮 `ensure_client` 重建全新对象，实测可稳定恢复（等价于进程重启的收益）。
+    #[cfg(feature = "ble")]
+    fn retire_ble_client(&self) {
+        let mut slot = self.vendor_gatt_client_slot.lock().unwrap();
+        if slot.is_some() {
+            *slot = None;
+            log::debug!(target: "hotplug", "BLE 客户端已退役，下一轮回连使用全新会话对象");
+        }
+    }
+
     /// 阻塞:只枚举 hidapi HID 判定 USB 是否可连。Board-first detection must never
     /// enumerate or open OS audio endpoints; an explicit UAC compatibility request owns that.
     #[cfg(feature = "usb")]
@@ -1140,8 +1171,13 @@ impl HotplugManager {
         // 1. 扫描精确匹配已记录的 ble_last_device_name。
         let target = self.ble_last_device_name.lock().unwrap().clone();
         self.emit_reconnect(ReconnectState::Scanning, None, None);
-
-        let (peripheral, found_name) = match client.scan_for_device(target.as_deref()).await {
+        // USB 抢占在扫描/连接的每个间隙都能立即让出状态机（Windows 实测 2026-11-16：
+        // 整轮扫描 10s + 连接 3×20s 会把 USB 识别拖到最坏 ~70s，用户指示灯早已亮起）。
+        let usb_preempt = Self::usb_preempting_now;
+        let (peripheral, found_name) = match client
+            .scan_for_device(target.as_deref(), Some(&usb_preempt))
+            .await
+        {
             Ok((p, name)) => {
                 log::info!(target: "hotplug", "扫描到 BLE 设备: {}", name);
                 (p, name)
@@ -1194,6 +1230,9 @@ impl HotplugManager {
                     && stop.as_ref().is_none_or(|f| f.load(Ordering::SeqCst))
                     && auto.load(Ordering::SeqCst)
                     && target.lock().unwrap().as_deref() == Some(name.as_str())
+                    // USB 已插入时立即放弃本轮 BLE（在 20s 连接尝试之间被调用），
+                    // 让外层循环马上接手 USB 会话。
+                    && !Self::usb_preempting_now()
             }
         };
         if let Err(e) = client.connect_with_retry(&peripheral, &still_wanted).await {
@@ -1206,6 +1245,7 @@ impl HotplugManager {
                 retry_delay.as_secs()
             );
             self.emit_error(format!("BLE 连接失败: {e}"), true);
+            self.retire_ble_client();
             tokio::time::sleep(retry_delay).await;
             return;
         }
@@ -1224,6 +1264,7 @@ impl HotplugManager {
             log::warn!(target: "hotplug", "BLE 通知监听启动失败: {}", error);
             let _ = client.disconnect().await;
             self.emit_error(format!("BLE 通知监听启动失败: {error}"), true);
+            self.retire_ble_client();
             tokio::time::sleep(retry_delay).await;
             return;
         }
@@ -1269,6 +1310,7 @@ impl HotplugManager {
                 };
                 log::warn!(target: "hotplug", "{}", message);
                 self.emit_error(message.to_string(), true);
+                self.retire_ble_client();
                 tokio::time::sleep(retry_delay).await;
                 return;
             }
@@ -1334,6 +1376,9 @@ impl HotplugManager {
 
         // 7. 断开(fire-and-forget)
         let _ = client.disconnect().await;
+        // 会话结束即退役：会话中途 ATT 卡死（写超时触发的主动断开）后，复用旧对象
+        // 重连会「服务发现 0 特征值」并连续楔死（2026-11-16 实测）；换新对象可恢复。
+        self.retire_ble_client();
 
         // Reason 03 can mean a missed identity deadline, so it must not
         // permanently block reconnection without an explicit rejected identity.
