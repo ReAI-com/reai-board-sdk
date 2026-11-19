@@ -708,6 +708,7 @@ impl HotplugManager {
                 #[cfg(feature = "usb")]
                 ConnectionType::Usb => {
                     self.run_usb_session().await;
+                    #[cfg(feature = "ble")]
                     self.note_usb_session_ended();
                 }
                 #[cfg(not(feature = "usb"))]
@@ -1063,7 +1064,7 @@ impl HotplugManager {
     /// 记录 USB 会话结束时刻，供 [`Self::detect_connection`] 的 BLE 回连宽限判定。
     /// 拔线后固件先进入定向广播窗口（见 [`BLE_RECONNECT_GRACE_AFTER_USB`]），
     /// Windows 上立即首连必失败且易楔死 WinRT，故等过窗口再回连。
-    #[cfg(feature = "ble")]
+    #[cfg(all(feature = "usb", feature = "ble"))]
     fn note_usb_session_ended(&self) {
         let grace = BLE_RECONNECT_GRACE_AFTER_USB;
         *self.usb_session_ended_at.lock().unwrap() = Some(std::time::Instant::now());

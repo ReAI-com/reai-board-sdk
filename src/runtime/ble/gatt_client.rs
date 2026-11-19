@@ -422,7 +422,7 @@ impl VendorGattClient {
 
     /// 扫描发现 Vendor GATT 设备,返回 (Peripheral, 设备名)。
     ///
-    /// 传 target_name 精确匹配;否则匹配 REAI_VB_ 前缀。轮询节奏见 [`SCAN_POLL_DELAYS_MS`]。
+    /// 传 target_name 精确匹配;否则匹配 REAI_VB_ 前缀。轮询节奏见 `SCAN_POLL_DELAYS_MS`。
     /// `should_abort` 在每个轮询间隙被调用，返回 true 时中止扫描（Windows 上用于
     /// USB 抢占：整轮 10s 扫描期间插入的 USB 不能等到轮末才被看见，2026-11-16）。
     pub async fn scan_for_device(
