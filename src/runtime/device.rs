@@ -574,12 +574,12 @@ impl BoardDeviceCore {
                         connection_type: None,
                         reason: Some(DisconnectReason::UserAction),
                     }));
+                    Ok(())
                 }
                 #[cfg(not(feature = "ble"))]
                 {
-                    return Err(anyhow::anyhow!("BLE feature 未启用，无法断开 BLE 连接"));
+                    Err(anyhow::anyhow!("BLE feature 未启用，无法断开 BLE 连接"))
                 }
-                Ok(())
             }
         }
     }
@@ -995,9 +995,11 @@ impl BoardDeviceCore {
 
     /// 查询键盘的绑定状态（CMD 0x72，固件 v1.75+，能力位 bit4）。
     pub async fn host_bind_get(&self) -> Result<crate::kernel::protocol_hid::HostBindStatus> {
+        #[cfg(feature = "usb")]
+        use crate::kernel::protocol_hid::parse_host_bind_get_hid_response;
+        #[cfg(feature = "ble")]
         use crate::kernel::protocol_hid::{
-            parse_host_bind_get_gatt_response, parse_host_bind_get_hid_response,
-            CMD_AI_HOST_BIND_GET,
+            parse_host_bind_get_gatt_response, CMD_AI_HOST_BIND_GET,
         };
         let conn_type = self
             .connection()
@@ -1012,7 +1014,7 @@ impl BoardDeviceCore {
             }
             #[cfg(not(feature = "usb"))]
             ConnectionType::Usb => {
-                let _ = conn_type;
+                let _ = (conn_type, packet);
                 anyhow::bail!("usb feature 未启用");
             }
             ConnectionType::Ble => {
@@ -1024,7 +1026,7 @@ impl BoardDeviceCore {
                 }
                 #[cfg(not(feature = "ble"))]
                 {
-                    let _ = conn_type;
+                    let _ = (conn_type, packet);
                     anyhow::bail!("BLE feature 未启用");
                 }
             }
@@ -1033,10 +1035,11 @@ impl BoardDeviceCore {
 
     /// 解绑（CMD 0x73，恢复开放广播/直连；调试与售后兜底用）。
     pub async fn host_bind_unbind(&self) -> Result<()> {
-        use crate::kernel::protocol_hid::{
-            parse_host_result_gatt_response, parse_host_result_hid_response, HidPacket,
-            CMD_AI_HOST_BIND_UNBIND,
-        };
+        #[cfg(feature = "ble")]
+        use crate::kernel::protocol_hid::parse_host_result_gatt_response;
+        #[cfg(feature = "usb")]
+        use crate::kernel::protocol_hid::parse_host_result_hid_response;
+        use crate::kernel::protocol_hid::{HidPacket, CMD_AI_HOST_BIND_UNBIND};
         let conn_type = self
             .connection()
             .ok_or_else(|| anyhow::anyhow!("设备未连接"))?;
@@ -1053,7 +1056,7 @@ impl BoardDeviceCore {
             }
             #[cfg(not(feature = "usb"))]
             ConnectionType::Usb => {
-                let _ = conn_type;
+                let _ = (conn_type, packet);
                 anyhow::bail!("usb feature 未启用");
             }
             ConnectionType::Ble => {
@@ -1069,7 +1072,7 @@ impl BoardDeviceCore {
                 }
                 #[cfg(not(feature = "ble"))]
                 {
-                    let _ = conn_type;
+                    let _ = (conn_type, packet);
                     anyhow::bail!("BLE feature 未启用");
                 }
             }
